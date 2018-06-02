@@ -1,0 +1,30 @@
+    void stb_tricks::StbEnhancements::get_right_step_xy(float *step_x, float *step_y,
+                                                    float shift_x, float shift_y,
+                                                    int total_frames, int frame_num)
+{
+    float tmp_st_x = std::floor(shift_x / total_frames);
+    float tmp_st_y = std::floor(shift_y / total_frames);
+
+    float tmp_sh_x = tmp_st_x * total_frames;
+    float tmp_sh_y = tmp_st_y * total_frames;
+
+    float dx = std::floor(shift_x) - tmp_sh_x;
+    float dy = std::floor(shift_y) - tmp_sh_y;
+
+
+    if( frame_num >= total_frames - std::abs(dx) )
+      *step_x = tmp_st_x + 1.0f;
+    else
+      *step_x = tmp_st_x;
+
+    if( frame_num >= total_frames - std::abs(dy) )
+      *step_y = tmp_st_y + 1.0f;
+    else
+      *step_y = tmp_st_y;
+
+    if(*step_x * frame_num > std::abs(shift_x) || *step_y * frame_num > std::abs(shift_y))
+    {
+        *step_x = 0.0f;
+        *step_y = 0.0f;
+    }
+}
