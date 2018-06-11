@@ -31,7 +31,7 @@ enum class ColorMode
 class ColorShader
 {
 public:
-  ColorShader(int length, int block_size, cv::Mat img1, cv::Mat img2, ColorMode color_mode, DrawMode draw_mode);
+  ColorShader(int length, cv::Mat img1, cv::Mat img2, ColorMode color_mode, DrawMode draw_mode);
   ~ColorShader() {}
 
   void color_image(ngl::Vec4 *color, ngl::Vec2 coord, int frame);
@@ -54,7 +54,6 @@ public:
   inline cv::Mat get_affine_matrix() { return affine_m; }
   inline void update_affine_matrix(cv::Mat affine) { affine_m.at<double>(0,2) = affine_m.at<double>(0,2) + affine.at<double>(0,2);
                                                      affine_m.at<double>(1,2) = affine_m.at<double>(1,2) + affine.at<double>(1,2); }
-  cv::Mat update_affine_rotation_m(cv::Point2f sh_center, double step);
 #endif
 
 private:
@@ -74,25 +73,15 @@ private:
 
 private:
 
-#ifdef USE_OPENMP
-#pragma omp declare simd
-#endif
   inline float intersect_function(float a, float b) { return a + b - std::sqrt(a * a + b * b); }
-
-#ifdef USE_OPENMP
-#pragma omp declare simd
-#endif
   inline float union_function(float a, float b)     { return a + b + std::sqrt(a * a + b * b); }
-
-#ifdef USE_OPENMP
-#pragma omp declare simd
-#endif
   inline float subtract_function(float a, float b)  { return intersect_function(a, -b); }
+
   inline float min3(float a, float b, float c)      { return std::min(std::min(a, b), c); }
   inline float max3(float a, float b, float c)      { return std::max(std::max(a, b), c); }
 
-  float function1(float uv_x, float uv_y);
-  float function2(float uv_x, float uv_y);
+  //float function1(float uv_x, float uv_y);
+  //float function2(float uv_x, float uv_y);
   float function3(ngl::Vec2 uv, float time);
 
 
@@ -119,11 +108,11 @@ private:
   int block_size_param;
   int length_param;
 
-  float smallest_dist_squared1 = 10000.0f;
-  float smallest_dist_squared2 = 10000.0f;
   float a0,a1,a2,a3;
 
-  float rad1, rad2;
+  float rad1, rad2, r1, r2;
+  float rec1_w, rec1_h, rec2_w, rec2_h;
+
   std::vector<float> center1,   center2;
   std::vector<float> center_r1, center_r2;
   std::vector<float> F1, F2, F2_m;

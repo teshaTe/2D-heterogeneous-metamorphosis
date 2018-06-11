@@ -1,9 +1,5 @@
 #include "include/stb_tricks.h"
 
-#ifdef USE_OPENMP
-  #include <omp.h>
-#endif
-
 #include <opencv2/imgcodecs.hpp>
 #include <iostream>
 
@@ -194,31 +190,6 @@ cv::Mat stb_tricks::StbEnhancements::get_affine_transformed_image(cv::Mat src, c
             }
         }
     }
-
-    return dst;
-}
-
-cv::Mat stb_tricks::StbEnhancements::get_affine_rotated_image(cv::Mat src, double angle, double scale, cv::Point2f *center)
-{
-    cv::Mat dst = cv::Mat(src.size(), src.type());
-    cv::Mat affine_m = cv::getRotationMatrix2D(*center, angle, scale);
-    cv::warpAffine(src, dst, affine_m, src.size(), cv::WARP_FILL_OUTLIERS);
-
-    unsigned char *img_buff = static_cast<unsigned char*>(dst.data);
-
-    /*for(int y = 0; y < dst.rows; ++y)
-    {
-        for(int x = 0; x < dst.cols; ++x)
-        {
-            if(img_buff[x*dst.channels()+3+y*dst.step] == 0)
-            {
-                img_buff[x*dst.channels()  +y*dst.step] = 0;
-                img_buff[x*dst.channels()+1+y*dst.step] = 0;
-                img_buff[x*dst.channels()+2+y*dst.step] = 0;
-                img_buff[x*dst.channels()+3+y*dst.step] = 255;
-            }
-        }
-    }*/
 
     return dst;
 }

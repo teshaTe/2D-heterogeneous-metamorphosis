@@ -28,11 +28,11 @@ public:
   inline std::vector<double> get_SDDT1()         { return SDDT1; }
   inline std::vector<double> get_SDDT2()         { return SDDT2; }
 
-  inline float get_SDDT1_values(ngl::Vec2 uv)    { return SDDT1[static_cast<int>((im_w-b_sh) * uv.m_x) +
-                                                                static_cast<int>((im_h-b_sh) * uv.m_y) * im_w]; }
+  inline float get_SDDT1_values(cv::Vec2f uv)    { return SDDT1[static_cast<int>((im_w-b_sh) * uv[0]) +
+                                                                static_cast<int>((im_h-b_sh) * uv[1]) * im_w]; }
 
-  inline float get_SDDT2_values(ngl::Vec2 uv)    { return SDDT2[static_cast<int>((im_w-b_sh) * uv.m_x) +
-                                                                static_cast<int>((im_h-b_sh) * uv.m_y) * im_w]; }
+  inline float get_SDDT2_values(cv::Vec2f uv)    { return SDDT2[static_cast<int>((im_w-b_sh) * uv[0]) +
+                                                                static_cast<int>((im_h-b_sh) * uv[1]) * im_w]; }
 
   inline float get_continuous_SDF1(float uv_x, float uv_y) { return generate_bilinear_interpolation(uv_x, uv_y, SDDT1); }
   inline float get_continuous_SDF2(float uv_x, float uv_y) { return generate_bilinear_interpolation(uv_x, uv_y, SDDT2); }
@@ -40,10 +40,11 @@ public:
   float generate_bilinear_interpolation(float u0, float v0, const std::vector<double> SDDT);
 
 #ifdef USE_AFFINE_TRANSFORMATIONS
-  void inverse_mapping_result(float *res, std::vector<float> SDF, float u_shifted, float v_shifted, cv::Mat affine_m, cv::Mat affine_rot_m);
   void inverse_mapping_result(float *res, std::vector<float> SDF, float u_shifted, float v_shifted, cv::Mat affine_m);
+
 private:
   inline float get_massive_val(float *massive, int x, int y, int width) { return massive[x+y*width]; }
+
   inline float extrapolate_vals(float val1, float val2, int n1, int n2, int cur_n)  { return val1 + (val2 - val1) * (cur_n - n1)/(n2 - n1); }
 #endif
 
