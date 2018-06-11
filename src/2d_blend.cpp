@@ -1,9 +1,13 @@
-#include <opencv2/highgui.hpp>
+#ifdef USE_OPENMP
+  #include <openmp/include/omp.h>
+#endif
+
 #include <opencv2/imgcodecs.hpp>
 #include <iostream>
 #include <chrono>
 #include <ctime>
 #include <ratio>
+#include <vector>
 
 #include "include/shader.h"
 
@@ -53,15 +57,15 @@ namespace  args
   int frame        = 0;
   int n_frames     = 100;
   int move_img2_fr = 0;
-  int block_size   = 1;
+  float scale = 0.0f;
 }
 
 void print_args()
 {
-  std::cout << "Draw mode by default   - white"    << std::endl;
-  std::cout << "Colour mode by default - rgb"      << std::endl;
-  std::cout << "Block_size = " << args::block_size << std::endl;
-  std::cout << "Frame_num  = " << args::n_frames   << std::endl;
+  std::cout << "Draw mode by default   - white"  << std::endl;
+  std::cout << "Colour mode by default - rgb"    << std::endl;
+  std::cout << "Frame_num  = " << args::n_frames << std::endl;
+  std::cout << "Scale = "      << args::scale    << std::endl;
 }
 
 void print_help()
@@ -74,7 +78,7 @@ void print_help()
   std::cout << "-im2 - specify final image \n";
   std::cout << "-d   - specify draw mode [white, block, blend, closest] \n";
   std::cout << "-c   - specify colour mode [rgb, hsv, lab] \n";
-  std::cout << "-b   - specify the texture block size \n";
+  std::cout << "-s   - specify the scale for the picture [optional] \n";
   std::cout << "-n   - specify the number of output frames \n";
   std::cout << "-o   - specify output path [optional] \n";
   std::cout << "--back - specify image for background [optional] \n";
@@ -101,8 +105,8 @@ bool parse_args(int argc, char** argv)
     else if (!strcmp(cur, "-c"))
       args::color_mode = getColorMode(argv[i + 1]);
 
-    else if (!strcmp(cur, "-b"))
-      args::block_size = std::stoi(argv[i + 1]);
+    else if (!strcmp(cur, "-s"))
+      args::scale = std::stoi(argv[i + 1]);
 
     else if (!strcmp(cur, "-n"))
       args::n_frames = std::stoi(argv[i + 1]);
@@ -149,27 +153,43 @@ void set_image_background(cv::Mat *dst, cv::Mat src, cv::Mat back_img)
     unsigned char *dst_buf      = static_cast<unsigned char*>(dst->data);
     unsigned char *back_img_buf = static_cast<unsigned char*>(back_img.data);
     unsigned char *src_buf      = static_cast<unsigned char*>(src.data);
+    int b_ch = back_img.channels();
+    int d_ch = dst->channels();
+    int s_ch = src.channels();
+    size_t b_step = back_img.step;
+    size_t d_step = dst->step;
+    size_t s_step = src.step;
+    int im_w = src.cols;
+    int im_h = src.rows;
 
-    for(int y = 0; y < src.cols; ++y)
+#ifdef USE_OPENMP
+#pragma omp parallel shared(im_h, im_w, s_ch, s_step, d_ch, d_step, s_ch, s_step, b_ch, b_step, dst_buf, back_img_buf, src_buf)
+{
+#pragma omp for simd schedule(static,5)
+#endif
+    for(int y = 0; y < im_h; ++y)
     {
-        for(int x = 0; x < src.rows; ++x)
+        for(int x = 0; x < im_w; ++x)
         {
-            if(src_buf[x*src.channels()+3+y*src.step] == 0)
+            if(src_buf[x*s_ch+3+y*s_step] == 0)
             {
-                dst_buf[x*dst->channels()  +y*dst->step] = back_img_buf[x*back_img.channels()  +y*back_img.step];
-                dst_buf[x*dst->channels()+1+y*dst->step] = back_img_buf[x*back_img.channels()+1+y*back_img.step];
-                dst_buf[x*dst->channels()+2+y*dst->step] = back_img_buf[x*back_img.channels()+2+y*back_img.step];
-                dst_buf[x*dst->channels()+3+y*dst->step] = back_img_buf[x*back_img.channels()+3+y*back_img.step];
+                dst_buf[x*d_ch  +y*d_step] = back_img_buf[x*b_ch  +y*b_step];
+                dst_buf[x*d_ch+1+y*d_step] = back_img_buf[x*b_ch+1+y*b_step];
+                dst_buf[x*d_ch+2+y*d_step] = back_img_buf[x*b_ch+2+y*b_step];
+                dst_buf[x*d_ch+3+y*d_step] = back_img_buf[x*b_ch+3+y*b_step];
             }
             else
             {
-                dst_buf[x*dst->channels()  +y*dst->step] = src_buf[x*src.channels()  +y*src.step];
-                dst_buf[x*dst->channels()+1+y*dst->step] = src_buf[x*src.channels()+1+y*src.step];
-                dst_buf[x*dst->channels()+2+y*dst->step] = src_buf[x*src.channels()+2+y*src.step];
-                dst_buf[x*dst->channels()+3+y*dst->step] = src_buf[x*src.channels()+3+y*src.step];
+                dst_buf[x*d_ch  +y*d_step] = src_buf[x*s_ch  +y*s_step];
+                dst_buf[x*d_ch+1+y*d_step] = src_buf[x*s_ch+1+y*s_step];
+                dst_buf[x*d_ch+2+y*d_step] = src_buf[x*s_ch+2+y*s_step];
+                dst_buf[x*d_ch+3+y*d_step] = src_buf[x*s_ch+3+y*s_step];
             }
         }
     }
+#ifdef USE_OPENMP
+}
+#endif
 }
 
 
@@ -193,79 +213,116 @@ int main(int argc, char** argv)
         return -1;
     }
 
-    shader::ColorShader new_shader(args::n_frames, args::block_size, img1, img2, args::color_mode, args::draw_mode);
+    cv::Mat img11, img22;
 
-    cv::Mat dst = cv::Mat(img2.rows, img2.cols, img2.type());
+    if(args::scale > 0)
+    {
+        img11 = cv::Mat(img1.rows/args::scale, img1.cols/args::scale, img1.type());
+        img22 = cv::Mat(img2.rows/args::scale, img2.cols/args::scale, img2.type());
+
+        cv::resize(img1, img11, img11.size(), 0, 0,cv::INTER_NEAREST);
+        cv::resize(img2, img22, img22.size(), 0, 0,cv::INTER_NEAREST);
+    }
+    else
+    {
+        img11 = cv::Mat(img1.rows, img1.cols, img1.type());
+        img22 = cv::Mat(img2.rows, img2.cols, img2.type());
+        img1.copyTo(img11);
+        img2.copyTo(img22);
+    }
+
+    shader::ColorShader new_shader(args::n_frames, img11, img22, args::color_mode, args::draw_mode);
+
+    cv::Mat dst = cv::Mat(img22.rows, img22.cols, img22.type());
     unsigned char *dst_buff = static_cast<unsigned char*>(dst.data);
     int frame_num = args::frame;
 
     std::cout << std::endl;
+    int im_w = img22.cols;
+    int im_h = img22.rows;
 
 #ifdef USE_AFFINE_TRANSFORMATIONS
     std::vector<float> rec1_c = new_shader.get_rec1_center();
     std::vector<float> rec2_c = new_shader.get_rec2_center();
 
-    float shift_x = (rec2_c[0] - rec1_c[0]) * img2.cols;
-    float shift_y = (rec2_c[1] - rec1_c[1]) * img2.rows;
+    float shift_x = (rec2_c[0] - rec1_c[0]) * im_w;
+    float shift_y = (rec2_c[1] - rec1_c[1]) * im_h;
 
     std::vector<float> f2 = new_shader.get_f2_values();
+    std::vector<float> affine_time;
 #endif //USE_AFFINE_TRANSFORMATIONS
 
     auto start1 = std::chrono::high_resolution_clock::now();
     ngl::Vec4 col = ngl::Vec4(0.0, 0.0, 0.0, 0.0);
 
+    std::vector<double> time;
+    size_t d_step = dst.step;
+    int d_ch = dst.channels();
+
     while(frame_num < args::n_frames)
     {
        auto start2 = std::chrono::high_resolution_clock::now();
 
-/*#ifdef USE_OPENMP
-#pragma omp target teams distribute parallel for collapse(2) map(from: dst_buff) map(to: col, frame_num, img2, dst)
-#endif*/
-       for(int y = 0; y < img2.rows; y++ )
+//calculating STB+STTI over each frame
+       for(int y = 0; y < im_h; y++ )
        {
-           for(int x = 0; x < img2.cols; x++ )
+           for(int x = 0; x < im_w; x++ )
            {
-               new_shader.color_image( &col, ngl::Vec2(x, y), frame_num );
-               dst_buff[x*dst.channels()  +y*dst.step] = col.m_b * 255;
-               dst_buff[x*dst.channels()+1+y*dst.step] = col.m_g * 255;
-               dst_buff[x*dst.channels()+2+y*dst.step] = col.m_r * 255;
-               dst_buff[x*dst.channels()+3+y*dst.step] = col.m_a * 255;
+               new_shader.color_image( &col, ngl::Vec2(x,y), frame_num );
+               dst_buff[x*d_ch  +y*d_step] = col.m_b * 255;
+               dst_buff[x*d_ch+1+y*d_step] = col.m_g * 255;
+               dst_buff[x*d_ch+2+y*d_step] = col.m_r * 255;
+               dst_buff[x*d_ch+3+y*d_step] = col.m_a * 255;
            }
        }
 
-
-       cv::Mat new_dst = cv::Mat(dst.cols,dst.rows,dst.type(), dst_buff);
-
+       //writing image with or without background
        if(!args::background.empty())
        {
-           cv::Mat final_dst = cv::Mat(new_dst.cols, new_dst.rows, new_dst.type());
            cv::Mat background = cv::imread(args::background, cv::IMREAD_UNCHANGED);
-
            if(background.empty())
            {
                std::cerr << "ERROR: failed to load background image [--back]! " << std::endl;
                return -1;
            }
 
-           set_image_background(&final_dst, new_dst, background);
-           std::string save_path = args::file_out + std::to_string(frame_num) + ".png";
-           cv::imwrite(save_path, final_dst);
+           if(args::scale > 0)
+           {
+               cv::Mat final_dst = cv::Mat(im_w*args::scale, im_h*args::scale, dst.type());
+               cv::Mat dst0      = cv::Mat(im_w*args::scale, im_h*args::scale, dst.type());
+               cv::resize(dst, dst0, dst0.size(), cv::INTER_AREA);
+
+               set_image_background(&final_dst, dst0, background);
+               std::string save_path = args::file_out + std::to_string(frame_num) + ".png";
+               cv::imwrite(save_path, final_dst);
+           }
+           else
+           {
+               cv::Mat final_dst = cv::Mat(im_w, im_h, dst.type());
+
+               set_image_background(&final_dst, dst, background);
+               std::string save_path = args::file_out + std::to_string(frame_num) + ".png";
+               cv::imwrite(save_path, final_dst);
+           }
        }
        else
        {
            std::string save_path = args::file_out + std::to_string(frame_num) + ".png";
-           cv::imwrite(save_path, new_dst);
+           cv::imwrite(save_path, dst);
        }
 
        auto end2 = std::chrono::high_resolution_clock::now();
        auto dur2 = std::chrono::duration_cast<std::chrono::duration<double>>(end2 - start2);
+
        std::cout << "image_"       <<frame_num     << " is saved." << std::endl;
        std::cout << "spent time: " << dur2.count() << " seconds"   << std::endl;
+       time.push_back(dur2.count());
 
 #ifdef USE_AFFINE_TRANSFORMATIONS
        auto start3 = std::chrono::high_resolution_clock::now();
 
-       float st_x = 0.0f; float st_y = 0.0f;
+       float st_x = 0.0f;
+       float st_y = 0.0f;
        stb_tricks::StbEnhancements stb;
        stb.get_right_step_xy(&st_x, &st_y, shift_x, shift_y, 70);
 
@@ -273,33 +330,39 @@ int main(int argc, char** argv)
        cv::Mat image2     = new_shader.get_image2();
        cv::Mat image2_sh  = stb.get_affine_transformed_image(image2, &affine_m_st, st_x, st_y);
 
+       cv::imwrite("tmp.png", image2_sh);
+
        new_shader.update_affine_matrix(affine_m_st);
        affine_m = new_shader.get_affine_matrix();
 
-       std::vector<float> f2_m;
+       std::vector<float> f22_m;
+       f22_m.resize(f2.size());
+       float *f2_m = f22_m.data();
+       float u_x, u_y;
        float res = 0.0f;
 
-       for(int y = 0; y < image2_sh.rows; ++y)
+       for(int y = 0; y < im_h; ++y)
        {
-           for(int x = 0; x < image2_sh.cols; ++x)
+           for(int x = 0; x < im_w; ++x)
            {
-               float u_x = static_cast<float>(x) / static_cast<float>(image2_sh.rows);
-               float u_y = static_cast<float>(y) / static_cast<float>(image2_sh.cols);
+               u_x = static_cast<float>(x) / static_cast<float>(im_h);
+               u_y = static_cast<float>(y) / static_cast<float>(im_w);
                new_shader.DF.get()->inverse_mapping_result(&res, f2, u_x, u_y, affine_m);
-               f2_m.push_back(res);
+               f2_m[x+y*im_w] = res;
            }
        }
 
        new_shader.update_image2(image2_sh);
        new_shader.update_im2_buff();
-       new_shader.update_f2_tr_values(f2_m);
+       new_shader.update_f2_tr_values(f22_m);
        new_shader.update_ai_coeffs();
+       f22_m.clear();
 
        auto end3 = std::chrono::high_resolution_clock::now();
        auto dur3 = std::chrono::duration_cast<std::chrono::duration<double>>(end3 - start3);
        std::cout << "spent time(affine_op): " << dur3.count() << " seconds"   << std::endl;
+       affine_time.push_back(dur3.count() + dur2.count());
 
-       f2_m.clear();
 #endif //USE_AFFINE_TRANSFORMATIONS
 
        frame_num += 1;
@@ -308,6 +371,16 @@ int main(int argc, char** argv)
     auto end1 = std::chrono::high_resolution_clock::now();
     auto dur1 = std::chrono::duration_cast<std::chrono::duration<double>>(end1 - start1);
     std::cout << "total time: " << dur1.count() << " seconds" << std::endl;
+
+#ifndef USE_AFFINE_TRANSFORMATIONS
+    std::cout << "min_time per frame: "     << *std::minmax_element(time.begin(), time.end()).first  << std::endl;
+    std::cout << "max_time per frame: "     << *std::minmax_element(time.begin(), time.end()).second << std::endl;
+    std::cout << "average_time per frame: " << dur1.count() / args::n_frames <<std::endl;
+#else
+    std::cout << "min_time per frame: "     << *std::minmax_element(affine_time.begin(), affine_time.end()).first  << std::endl;
+    std::cout << "max_time pre frame: "     << *std::minmax_element(affine_time.begin(), affine_time.end()).second << std::endl;
+    std::cout << "average_time per frame: " << dur1.count() / args::n_frames << std::endl;
+#endif
 
   return 0;
 }
