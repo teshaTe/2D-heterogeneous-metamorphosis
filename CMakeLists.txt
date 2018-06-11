@@ -6,19 +6,19 @@ set(CMAKE_INCLUDE_CURRENT_DIR ON)
 set(CMAKE_AUTOMOC ON)
 
 set(CMAKE_CXX_STANDARD 11)
-set(CMAKE_CXX_FLAGS "-O3 -pthread ${CMAKE_CXX_FLAGS}")
+set(CMAKE_CXX_FLAGS " -pthread ${CMAKE_CXX_FLAGS}")
 
 option(USE_SMOOTHED_CYLINDERS       OFF)
-option(USE_DISTANCE_FIELDS           ON)
+option(USE_DISTANCE_FIELDS          OFF)
 option(USE_AFFINE_TRANSFORMATIONS   OFF)
 option(USE_CONE_F3                  OFF)
 option(USE_PYRAMID_F3               OFF)
-option(USE_EGG_SHAPE_F3             OFF)
 option(USE_TRANSPARENT_BACKBGROUND  OFF)
-option(USE_CIRCLE_CIRCLE->CROSS     OFF)
-option(USE_CIRCLE_RING->CROSS       OFF)
-option(USE_CIRCLE1->CIRCLE2         OFF)
-option(USE_OPENMP                   ON)
+#option(USE_CIRCLE_CIRCLE->CROSS     OFF)
+#option(USE_CIRCLE_RING->CROSS       OFF)
+#option(USE_CIRCLE1->CIRCLE2         OFF)
+option(USE_OPENMP                   OFF)
+#option(USE_OPENMP_WITH_CUDA_CLANG   OFF)
 
 if(USE_SMOOTHED_CYLINDERS)
     add_definitions(-DUSE_SMOOTHED_CYLINDERS)
@@ -62,15 +62,29 @@ endif()
 
 if(USE_OPENMP)
     add_definitions(-DUSE_OPENMP)
-    find_package(OpenMP)
-    set(CMAKE_CXX_FLAGS " -fopenmp ${CMAKE_CXX_FLAGS}")
+
+    include_directories("${CMAKE_CURRENT_SOURCE_DIR}/openmp/include")
+    link_directories("${CMAKE_CURRENT_SOURCE_DIR}/openmp/lib")
+
+    if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
+        set(CMAKE_CXX_FLAGS "-fopenmp=libomp ${CMAKE_CXX_FLAGS}")
+    else()
+        set(CMAKE_CXX_FLAGS "-fopenmp ${CMAKE_CXX_FLAGS}")
+    endif()
+
+    if(USE_OPENMP_WITH_CUDA_CLANG)
+      add_definitions(-DUSE_OPENMP_WITH_CUDA_CLANG)
+      find_package(CUDA)
+      set(CMAKE_CXX_FLAGS "-openmp-targets=nvptx64-nvidia-cuda --cuda-path=${CUDA_TOOLKIT_ROOT_DIR} ${CMAKE_CXX_FLAGS}")
+    endif()
+
 endif()
 
 include_directories("${CMAKE_CURRENT_SOURCE_DIR}/NGL/include")
 link_directories("${CMAKE_CURRENT_SOURCE_DIR}/NGL/lib")
 
 include_directories("${CMAKE_CURRENT_SOURCE_DIR}/opencv/include")
-link_directories("${CMAKE_CURRENT_SOURCE_DIR}/opencv/lib")
+link_directories("${CMAKE_CURRENT_SOURCE_DIR}/opencv/clang_lib")
 
 find_package(Qt5OpenGL)
 
@@ -88,4 +102,13 @@ set (SRC_SOURCE
     )
 
 add_executable(2d_blend src/2d_blend.cpp ${SRC_SOURCE} ${SRC_HEADERS})
-target_link_libraries(2d_blend NGL boost_system opencv_highgui opencv_core opencv_imgcodecs opencv_imgproc ${OpenMP_LIBRARIES} Qt5::OpenGL Qt5::Widgets)
+target_link_libraries(2d_blend NGL boost_system opencv_imgcodecs opencv_highgui
+                               opencv_imgproc opencv_core Qt5::OpenGL Qt5::Widgets)
+
+if(USE_OPENMP)
+    target_link_libraries(2d_blend gomp omp omptarget omptarget-nvptx omptarget.rtl.cuda)
+endif()
+
+if(USE_OPENMP_WITH_CUDA_CLANG)
+    target_link_libraries(2d_blend ${CUDA_LIBRARIES})
+endif()
