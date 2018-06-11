@@ -1,5 +1,5 @@
 #ifdef USE_OPENMP
-  #include <omp.h>
+  #include <openmp/include/omp.h>
 #endif
 
 #include <cmath>
@@ -16,13 +16,12 @@
 #define INTERSECT shader::ColorShader::intersect_function
 #define SUBTRACT shader::ColorShader::subtract_function
 
-shader::ColorShader::ColorShader(int length, int block_size, cv::Mat img1, cv::Mat img2,
+shader::ColorShader::ColorShader(int length, cv::Mat img1, cv::Mat img2,
                                  ColorMode color_mode, DrawMode draw_mode)
 {
     length_param     = length;
     draw_mode_name   = draw_mode;
     color_mode_name  = color_mode;
-    block_size_param = block_size;
 
     img1.copyTo(image1);
     img2.copyTo(image2);
@@ -39,29 +38,60 @@ shader::ColorShader::ColorShader(int length, int block_size, cv::Mat img1, cv::M
     auto start = std::chrono::high_resolution_clock::now();
 
     DF = std::make_shared<distance_field::DistanceField>(image1, image2);
-    float x1, y1;
 
-    for(int i1= 0; i1 < image1.rows; ++i1)
+    std::vector<double> SDDT11 = DF.get()->get_SDDT1();
+    double *SDDT1 = SDDT11.data();
+    F1.resize(resolution_x*resolution_y);
+    float *FF1 = F1.data();
+
+    std::vector<double> SDDT22 = DF.get()->get_SDDT2();
+    double *SDDT2 = SDDT22.data();
+    F2.resize(resolution_x*resolution_y);
+    float *FF2 = F2.data();
+
+    double u, v, u_opp, v_opp;
+
+#ifdef USE_OPENMP
+#pragma omp parallel shared(SDDT1, SDDT2, FF1, FF2, resolution_x, resolution_y) private(u,v,u_opp,v_opp)
+{
+#pragma omp for simd schedule(static,5)
+#endif
+    for(int y= 0; y < resolution_y; ++y)
     {
-        for(int j1 = 0; j1 < image1.cols; ++j1)
+        for(int x = 0; x < resolution_x; ++x)
         {
-            x1 = static_cast<float>(j1) / static_cast<float>(resolution_x);
-            y1 = static_cast<float>(i1) / static_cast<float>(resolution_y);
-            F1.push_back(DF.get()->get_continuous_SDF1(x1, y1));
+            u = static_cast<double>(x / (resolution_x+1));
+            v = static_cast<double>(y / (resolution_y+1));
+
+            u_opp = 1.0 - u;
+            v_opp = 1.0 - v;
+
+            FF1[x+y*resolution_x] = ( SDDT1[x+    y* (resolution_x+1)] * u_opp + SDDT1[(x+1)+    y* (resolution_x+1)] * u ) * v_opp +
+                                    ( SDDT1[x+(y+1)* (resolution_x+1)] * u_opp + SDDT1[(x+1)+(y+1)* (resolution_x+1)] * u ) * v;
         }
     }
 
-    float x2, y2;
+#ifdef USE_OPENMP
+#pragma omp for simd schedule(static,5)
+#endif
 
-    for(int i2 = 0; i2 < resolution_y; ++i2)
+    for(int y= 0; y < resolution_y; ++y)
     {
-        for(int j2 = 0; j2 < resolution_x; ++j2)
+        for(int x = 0; x < resolution_x; ++x)
         {
-            x2 = static_cast<float>(j2) / static_cast<float>(resolution_x);
-            y2 = static_cast<float>(i2) / static_cast<float>(resolution_y);
-            F2.push_back(DF.get()->get_continuous_SDF2(x2, y2));
+            u = static_cast<double>(x / (resolution_x+1));
+            v = static_cast<double>(y / (resolution_y+1));
+
+            u_opp = 1.0 - u;
+            v_opp = 1.0 - v;
+
+            FF2[x+y*resolution_x] = ( SDDT2[x+    y*(resolution_x+1)] * u_opp + SDDT2[(x+1)+    y*(resolution_x+1)] * u ) * v_opp +
+                                    ( SDDT2[x+(y+1)*(resolution_x+1)] * u_opp + SDDT2[(x+1)+(y+1)*(resolution_x+1)] * u ) * v;
         }
     }
+#ifdef USE_OPENMP
+}
+#endif
 
 #ifndef USE_AFFINE_TRANSFORMATIONS
     auto end = std::chrono::high_resolution_clock::now();
@@ -76,6 +106,8 @@ shader::ColorShader::ColorShader(int length, int block_size, cv::Mat img1, cv::M
 #if defined(USE_CONE_F3) || defined(USE_EGG_SHAPE_F3)
     stb_tricks::StbEnhancements stb(image1, image2);
     stb.get_max_circle(&rad1, &rad2, &center1, &center2);
+    r1 = ( rad1 / resolution_x );
+    r2 = ( rad2 / resolution_x );
 #endif //USE_CONE_F3
 
 #ifdef USE_PYRAMID_F3
@@ -84,6 +116,10 @@ shader::ColorShader::ColorShader(int length, int block_size, cv::Mat img1, cv::M
     rec2 = stb.get_max_size_rectangle(stb.get_rectangle_box_2());
     center_r1 = stb.get_rectangle_center_coords_1();
     center_r2 = stb.get_rectangle_center_coords_2();
+    rec1_w = static_cast<float>( rec1.width )  / resolution_x;
+    rec1_h = static_cast<float>( rec1.height ) / resolution_y;
+    rec2_w = static_cast<float>( rec2.width )  / resolution_y;
+    rec2_h = static_cast<float>( rec2.height ) / resolution_x;
 #endif //USE_PYRAMID_F3
 
 #ifdef USE_AFFINE_TRANSFORMATIONS
@@ -93,17 +129,20 @@ shader::ColorShader::ColorShader(int length, int block_size, cv::Mat img1, cv::M
     center_r2 = stb.get_rectangle_center_coords_2();
 
     im2_buf = static_cast<unsigned char*>(image2.data);
+    F2_m.resize(F2.size());
+    float *F22_m = F2_m.data();
+    float u_x, u_y;
     float res = 0.0f;
 
-    for(int y = 0; y < image2.rows; ++y)
+    for(int y = 0; y < resolution_y; ++y)
     {
-        for(int x = 0; x < image2.cols; ++x)
+        for(int x = 0; x < resolution_x; ++x)
         {
-            float u_x = static_cast<float>(x)/static_cast<float>(image2.rows);
-            float u_y = static_cast<float>(y)/static_cast<float>(image2.cols);
+            u_x = static_cast<float>(x)/static_cast<float>(resolution_x);
+            u_y = static_cast<float>(y)/static_cast<float>(resolution_y);
 
             DF.get()->inverse_mapping_result(&res, F2, u_x, u_y, affine_m);
-            F2_m.push_back(res);
+            F22_m[x+y*resolution_x] = res;
         }
     }
 
@@ -114,6 +153,9 @@ shader::ColorShader::ColorShader(int length, int block_size, cv::Mat img1, cv::M
 #endif //defined(USE_AFFINE_TRANSFORMATIONS) || defined(USE_CONE_F3) || defined(USE_PYRAMID_F3)
 }
 
+
+
+
 void shader::ColorShader::set_ai_coeffs()
 {
 
@@ -122,8 +164,9 @@ void shader::ColorShader::set_ai_coeffs()
 
     stb_tricks::StbEnhancements stb(image1, image2, false);
     stb.get_max_circle(&r1, &r2, &cen1, &cen2);
-    float dist = std::sqrt(std::pow((cen2[0]*static_cast<float>(resolution_x) - cen1[0]*static_cast<float>(resolution_x)), 2.0) +
-                           std::pow((cen2[1]*static_cast<float>(resolution_y) - cen1[1]*static_cast<float>(resolution_y)), 2.0));
+    float cx = (cen2[0]*static_cast<float>(resolution_x) - cen1[0]*static_cast<float>(resolution_x));
+    float cy = (cen2[1]*static_cast<float>(resolution_y) - cen1[1]*static_cast<float>(resolution_y));
+    float dist = std::sqrt(cx*cx + cy*cy);
 
 #if defined (USE_CONE_F3) || defined(USE_PYRAMID_F3)
 #ifdef USE_PYRAMID_F3
@@ -149,8 +192,8 @@ void shader::ColorShader::set_ai_coeffs()
     //for understanding what is going on here look at the picture
     //yA is the y coordinate of A1' point from the picture
     //xB is the x coordinate of B1' point from the picture
-    float yA = 20.0f - std::sqrt(std::pow(a1+10.0f, 2.0f) + std::pow(10.0f-a1, 2.0f));
-    float xB = std::sqrt(0.5f * ( std::pow(20.0f-a1, 2.0f) - 200.0f ) );
+    float yA = 20.0f - std::sqrt( (a1 + 10.0f) * (a1 + 10.0f) + (10.0f - a1) * (10.0f - a1));
+    float xB = std::sqrt(0.5f * ( (20.0f - a1) * (20.0f - a1) - 200.0f ) );
 
     //xCC, yCC - coordinates of intersection of the A1'B1' and OC lines
     float k1  = xB * yA - a2 * a1;
@@ -159,7 +202,7 @@ void shader::ColorShader::set_ai_coeffs()
     float yCC = k1 / k2;
     float xCC = yCC;
 
-    a0 = std::sqrt(yCC*yCC + xCC*xCC);    
+    a0 = std::sqrt(yCC*yCC + xCC*xCC);
 #endif
 }
 
@@ -175,11 +218,12 @@ ngl::Vec4 shader::ColorShader::obtain_color(unsigned char *img_buf,cv::Mat *img,
 
     int x = static_cast<int>(uv.m_x * static_cast<float>(resolution_x)) * img->channels();
     int y = static_cast<int>(uv.m_y * static_cast<float>(resolution_y));
+    size_t step = img->step;
 
-    b = img_buf[x+  y*img->step];
-    g = img_buf[x+1+y*img->step];
-    r = img_buf[x+2+y*img->step];
-    a = img_buf[x+3+y*img->step];
+    b = img_buf[x+  y*step];
+    g = img_buf[x+1+y*step];
+    r = img_buf[x+2+y*step];
+    a = img_buf[x+3+y*step];
 
     ngl::Vec4 col( static_cast<float>(r/255.0f), static_cast<float>(g/255.0f),
                    static_cast<float>(b/255.0f), static_cast<float>(a/255.0f) );
@@ -222,8 +266,12 @@ ngl::Vec4 shader::ColorShader::BB_shade_surface(ngl::Vec2 uv, float time)
   float f1, f2;
 
 #ifdef USE_SMOOTHED_CYLINDERS
-  fun1 = function1(uv.m_x, uv.m_y);
-  fun2 = function2(uv.m_x, uv.m_y);
+  fun1 = F1[static_cast<int>(uv.m_x*resolution_x) + static_cast<int>(uv.m_y*resolution_y*resolution_x)];
+#ifdef USE_AFFINE_TRANSFORMATIONS
+  fun2 = F2_m[static_cast<int>(uv.m_x*resolution_x) + static_cast<int>(uv.m_y*resolution_y*resolution_x)];
+#else
+  fun2 = F2[static_cast<int>(uv.m_x*resolution_x) + static_cast<int>(uv.m_y*resolution_y*resolution_x)];
+#endif
 
   f1 = smooth_cylynder1(time, fun1);
   f2 = smooth_cylynder2(time, fun2);
@@ -237,12 +285,12 @@ ngl::Vec4 shader::ColorShader::BB_shade_surface(ngl::Vec2 uv, float time)
 
   float f3 = function3(uv, time);
 
-  float r1 = std::pow(f1/a1, 2.0f) + std::pow(f2/a2, 2.0f);
+  float r1 = (f1/a1)*(f1/a1) + (f2/a2)*(f2/a2);
   float r2 = 0.0f;
 
   if( f3 > 0.0f )
   {
-    r2 = std::pow(f3/a3, 2.0f);
+    r2 = (f3/a3) * (f3/a3);
   }
 
   float rr = 0.0f;
@@ -254,7 +302,7 @@ ngl::Vec4 shader::ColorShader::BB_shade_surface(ngl::Vec2 uv, float time)
   float d = 0.0f;
   if( rr < 1.0f )
   {
-    d = a0 * std::pow(1.0f - rr, 3.0f) / (1.0f + rr);
+    d = a0 * (1.0f - rr)*(1.0f - rr)*(1.0f - rr) / (1.0f + rr);
   }
 
   float blending_result = UNION(f1, f2) + d;
@@ -310,12 +358,12 @@ double shader::ColorShader::smooth_cylynder1(float time, float fun)
     float f2 = -time;
     float f3 =  time + 5.0f;
 
-    float r1 = std::pow(f1/b1, 2.0f) + std::pow(f2/b2, 2.0f);
+    float r1 = (f1/b1)*(f1/b1) + (f2/b2)*(f2/b2);
     float r2 = 0.0f;
 
     if( f3 > 0.0f )
     {
-      r2 = std::pow(f3/b3, 2.0f);
+      r2 = (f3/b3) * (f3/b3);
     }
 
     float rr = 0.0f;
@@ -327,7 +375,7 @@ double shader::ColorShader::smooth_cylynder1(float time, float fun)
     float d = 0.0f;
     if( rr < 1.0f )
     {
-      d = b0 * std::pow(1.0f - rr, 3.0f) / (1.0f + rr);
+      d = b0 * (1.0f - rr)*(1.0f - rr)*(1.0f - rr) / (1.0f + rr);
     }
 
     float blending_result = INTERSECT(f1, f2) + d;
@@ -354,12 +402,12 @@ double shader::ColorShader::smooth_cylynder2(float time, float fun)
     float f2 = time - 1.0f;
     float f3 = 5.0f - time;
 
-    float r1 = std::pow(f1/b1, 2.0f) + std::pow(f2/b2, 2.0f);
+    float r1 = (f1/b1)*(f1/b1) + (f2/b2)*(f2/b2);
     float r2 = 0.0f;
 
     if( f3 > 0.0f )
     {
-      r2 = std::pow(f3/b3, 2.0f);
+      r2 = (f3/b3) * (f3/b3);
     }
 
     float rr = 0.0f;
@@ -371,7 +419,7 @@ double shader::ColorShader::smooth_cylynder2(float time, float fun)
     float d = 0.0f;
     if( rr < 1.0f )
     {
-      d = b0 * std::pow(1.0f - rr, 3.0f) / (1.0f + rr);
+      d = b0 * (1.0f - rr)*(1.0f - rr)*(1.0f - rr) / (1.0f + rr);
     }
 
     float blending_result = INTERSECT(f1, f2) + d;
@@ -384,48 +432,64 @@ void shader::ColorShader::blend_colors(ngl::Vec2 uv, ngl::Vec4 *col1, ngl::Vec4 
   float result2  = f2;
   float u_x = uv.m_x;
   float u_y = uv.m_y;
+  int res_x = resolution_x;
+  int res_y = resolution_y;
+
+  unsigned char *buff_im1 = im1_buf;
+  unsigned char *buff_im2 = im2_buf;
 
   if(result1 < 0.0f)
-  {
-      float total_w1 = 0.0f;
-      float r1 = 0;
-      float g1 = 0;
-      float b1 = 0;
+   {
+       float total_w1 = 0.0f;
+       float r1 = 0;
+       float g1 = 0;
+       float b1 = 0;
+       int ch = image1.channels();
+       size_t step = image1.step;
+       float *data = F1.data();
+       float b,g,r,x1, y1, dist;
 
 #ifdef USE_OPENMP
-#pragma omp target teams distribute parallel for collapse(2) map(from: r1,g1,b1, total_w1) reduction(+:total_w1,r1,g1,b1) map(to: u_x,u_y)
+#ifdef USE_OPENMP_WITH_CUDA_CLANG
+#pragma omp target map(to: data[0: F1.size()], buff_im1[0:res_x*res_y*ch]) \
+                        map(to: u_x, u_y, ch, step, res_x, res_y, b,g,r,x1,y1,dist)
+{
+#pragma omp teams distribute parallel for simd reduction(+:total_w1,r1,g1,b1) schedule(static,1)
+#else
+#pragma omp parallel shared(b1,r1,g1,total_w1,data,buff_im1,ch,step,res_x, res_y) private(b,g,r,x1,y1,dist)
+{
+#pragma omp for simd reduction(+:total_w1, r1, g1, b1) schedule(static, 5)
 #endif
-     for(int i1 = 0; i1 < resolution_y; ++i1)
-     {
-        for(int j1 = 0; j1 < resolution_x; ++j1)
-        {
-           float x1 = static_cast<float>(j1) / static_cast<float>(resolution_x);
-           float y1 = static_cast<float>(i1) / static_cast<float>(resolution_y);
+#endif
+      for(int i1 = 0; i1 < res_y; ++i1)
+      {
+         for(int j1 = 0; j1 < res_x; ++j1)
+         {
+            if(data[j1+i1*res_x] >= 0.0f)
+            {
+                b = buff_im1[j1*ch+  i1*step] / 255.0f;
+                g = buff_im1[j1*ch+1+i1*step] / 255.0f;
+                r = buff_im1[j1*ch+2+i1*step] / 255.0f;
+                convert_from_RGB(&r, &g, &b);
 
-           if(function1(x1, y1) >= 0.0f)
-           {
-               float b = im1_buf[j1*image1.channels()+  i1*image1.step]/255.0f;
-               float g = im1_buf[j1*image1.channels()+1+i1*image1.step]/255.0f;
-               float r = im1_buf[j1*image1.channels()+2+i1*image1.step]/255.0f;
-               convert_from_RGB(&r, &g, &b);
+                x1 = static_cast<float>(j1) / static_cast<float>(res_x);
+                y1 = static_cast<float>(i1) / static_cast<float>(res_y);
+                dist = ( (u_x - x1) * (u_x - x1) + (u_y - y1) * (u_y - y1) ) *
+                       ( (u_x - x1) * (u_x - x1) + (u_y - y1) * (u_y - y1) );
 
-               b1 += b / ((std::pow(u_x - x1, 2.0f) + std::pow(u_y - y1, 2.0f)) *
-                          (std::pow(u_x - x1, 2.0f) + std::pow(u_y - y1, 2.0f)));
+                b1 += b / dist;
+                g1 += g / dist;
+                r1 += r / dist;
+                total_w1 += 1.0f / dist;
+            }
+         }
+      }
+#ifdef USE_OPENMP
+}
+#endif
 
-               g1 += g / ((std::pow(u_x - x1, 2.0f) + std::pow(u_y - y1, 2.0f)) *
-                          (std::pow(u_x - x1, 2.0f) + std::pow(u_y - y1, 2.0f)));
-
-               r1 += r / ((std::pow(u_x - x1, 2.0f) + std::pow(u_y - y1, 2.0f)) *
-                          (std::pow(u_x - x1, 2.0f) + std::pow(u_y - y1, 2.0f)));
-
-               total_w1 += 1.0f / ((std::pow(u_x - x1, 2.0f) + std::pow(u_y - y1, 2.0f)) *
-                                   (std::pow(u_x - x1, 2.0f) + std::pow(u_y - y1, 2.0f)));
-           }
-        }
-     }
-
-     *col1 = ngl::Vec4(r1 / total_w1, g1 / total_w1, b1 / total_w1, 1.0f);
-  }
+      *col1 = ngl::Vec4(r1 / total_w1, g1 / total_w1, b1 / total_w1, 1.0f);
+ }
 
   if(result2 < 0.0f)
   {
@@ -433,38 +497,54 @@ void shader::ColorShader::blend_colors(ngl::Vec2 uv, ngl::Vec4 *col1, ngl::Vec4 
       float r2 = 0;
       float g2 = 0;
       float b2 = 0;
+      int ch = image1.channels();
+      size_t step = image1.step;
+#ifdef USE_AFFINE_TRANSFORMATIONS
+      float *data = F2_m.data();
+#else
+      float *data = F2.data();
+#endif
+      float b,g,r,x2, y2, dist;
 
 #ifdef USE_OPENMP
-#pragma omp target teams distribute parallel for collapse(2) map(from:r2,g2,b2, total_w2) reduction(+:total_w2,r2,g2,b2) map(to: u_x, u_y)
+#ifdef USE_OPENMP_WITH_CUDA_CLANG
+#pragma omp target map(to: buff_im2[:res_x*res_y*ch], data[: F2.size()])\
+                        map(to: res_x, res_y, u_x, u_y, ch, step,b,g,r,x2,y2,dist)
+{
+#pragma omp teams distribute parallel for simd reduction(+:total_w2,r2,g2,b2) schedule(static,1)
+#else
+
+#pragma omp parallel shared(b2,r2,g2,total_w2,data,buff_im2,ch,step,res_x, res_y) private(b,g,r,x2,y2,dist)
+{
+#pragma omp for simd reduction(+:total_w2, r2, g2, b2) schedule(static, 5)
 #endif
-     for(int i2 = 0; i2 < resolution_y; ++i2)
+#endif
+     for(int i2 = 0; i2 < res_y; ++i2)
      {
-        for(int j2 = 0; j2 < resolution_x; ++j2)
+        for(int j2 = 0; j2 < res_x; ++j2)
         {
-           float x2 = static_cast<float>(j2) / static_cast<float>(resolution_x);
-           float y2 = static_cast<float>(i2) / static_cast<float>(resolution_y);
-
-           if(function2(x2, y2) >= 0.0f)
+           if(data[j2+i2*res_x] >= 0.0f)
            {
-               float b = im2_buf[j2*image2.channels()+  i2*image2.step]/255.0f;
-               float g = im2_buf[j2*image2.channels()+1+i2*image2.step]/255.0f;
-               float r = im2_buf[j2*image2.channels()+2+i2*image2.step]/255.0f;
-               convert_from_RGB(&r, &g, &b);
+              b = buff_im2[j2*ch+  i2*step] / 255.0f;
+              g = buff_im2[j2*ch+1+i2*step] / 255.0f;
+              r = buff_im2[j2*ch+2+i2*step] / 255.0f;
+              convert_from_RGB(&r, &g, &b);
 
-               b2 += b / ((std::pow(u_x - x2, 2.0f) + std::pow(u_y - y2, 2.0f)) *
-                          (std::pow(u_x - x2, 2.0f) + std::pow(u_y - y2, 2.0f)));
+              x2 = static_cast<float>(j2) / static_cast<float>(res_x);
+              y2 = static_cast<float>(i2) / static_cast<float>(res_y);
+              dist = ( (u_x - x2) * (u_x - x2) + (u_y - y2) * (u_y - y2) ) *
+                     ( (u_x - x2) * (u_x - x2) + (u_y - y2) * (u_y - y2) );
 
-               g2 += g / ((std::pow(u_x - x2, 2.0f) + std::pow(u_y - y2, 2.0f)) *
-                          (std::pow(u_x - x2, 2.0f) + std::pow(u_y - y2, 2.0f)));
-
-               r2 += r / ((std::pow(u_x - x2, 2.0f) + std::pow(u_y - y2, 2.0f)) *
-                          (std::pow(u_x - x2, 2.0f) + std::pow(u_y - y2, 2.0f)));
-
-               total_w2 += 1.0f / ((std::pow(u_x - x2, 2.0f) + std::pow(u_y - y2, 2.0f)) *
-                                   (std::pow(u_x - x2, 2.0f) + std::pow(u_y - y2, 2.0f)));
+               b2 += b / dist;
+               g2 += g / dist;
+               r2 += r / dist;
+               total_w2 += 1.0f / dist;
            }
         }
      }
+#ifdef USE_OPENMP
+}
+#endif
 
      *col2 = ngl::Vec4(r2 / total_w2, g2 / total_w2, b2 / total_w2, 1.0f);
   }
@@ -492,18 +572,22 @@ void shader::ColorShader::closest_color(ngl::Vec2 uv, ngl::Vec4 *col1, ngl::Vec4
   float u_y = uv.m_y;
   float cl1_uv_x, cl1_uv_y;
 
+  float *data1 = F1.data();
+  float smallest_dist_squared1 = 10000.0f;
+
 #ifdef USE_OPENMP
-#pragma omp target teams distribute parallel for collapse(2) map(from: cl1_uv_x, cl1_uv_y) map(to: u_x, u_y)
+#pragma omp target teams distribute parallel for collapse(2) map(from: cl1_uv_x, cl1_uv_y) \
+            map(to: u_x, u_y, smallest_dist_squared1) map(to: data1[:F1.size()])
 #endif
   for(int i1 = 0; i1 < resolution_y; ++i1)
   {
       for(int j1 = 0; j1 < resolution_x; ++j1)
       {
          float x1 = static_cast<float>(j1)/static_cast<float>(resolution_x);
-         float y1 = static_cast<float>(i1)/static_cast<float>(resolution_x);
-         float dist_squared = std::pow(u_x - x1, 2.0f) + std::pow(u_y - y1, 2.0f);
+         float y1 = static_cast<float>(i1)/static_cast<float>(resolution_y);
+         float dist_squared = (u_x - x1)*(u_x - x1) + (u_y - y1)*(u_y - y1);
 
-         if(function1(x1, y1) >= 0.0f && dist_squared < smallest_dist_squared1)
+         if(data1[j1+i1*resolution_x] >= 0.0f && dist_squared < smallest_dist_squared1)
          {
             smallest_dist_squared1 = dist_squared;
             cl1_uv_x = x1;
@@ -513,9 +597,16 @@ void shader::ColorShader::closest_color(ngl::Vec2 uv, ngl::Vec4 *col1, ngl::Vec4
   }
 
   float cl2_uv_x, cl2_uv_y;
+#ifdef USE_AFFINE_TRANSFORMATIONS
+      float *data2 = F2_m.data();
+#else
+      float *data2 = F2.data();
+#endif
+      float smallest_dist_squared2 = 10000.0f;
 
 #ifdef USE_OPENMP
-#pragma omp target teams distribute parallel for collapse(2) map(from: cl2_uv_x, cl2_uv_y) map(to: u_x, u_y)
+#pragma omp target teams distribute parallel for collapse(2) map(from: cl2_uv_x, cl2_uv_y) \
+            map(to: u_x, u_y,smallest_dist_squared1) map(to: data2[:F2.size()])
 #endif
   for(int i2 = 0; i2 < resolution_y; ++i2)
   {
@@ -523,9 +614,9 @@ void shader::ColorShader::closest_color(ngl::Vec2 uv, ngl::Vec4 *col1, ngl::Vec4
       {
         float x2 =  static_cast<float>(j2)/static_cast<float>(resolution_x);
         float y2 =  static_cast<float>(i2)/static_cast<float>(resolution_x);
-        float dist_squared = std::pow(u_x - x2, 2.0f) + std::pow(u_y - y2, 2.0f);
+        float dist_squared = (u_x - x2)*(u_x - x2) + (u_y - y2)*(u_y - y2);
 
-        if(function2(x2, y2) >= 0.0f && dist_squared < smallest_dist_squared2)
+        if(data2[j2+i2*resolution_x] >= 0.0f && dist_squared < smallest_dist_squared2)
         {
            smallest_dist_squared2 = dist_squared;
            cl2_uv_x = x2;
@@ -602,7 +693,7 @@ ngl::Vec4 shader::ColorShader::final_color(ngl::Vec2 uv, float f1, float f2, flo
 
 /*
  * function1() - controlls the shape of the 1 object
- */
+
 float shader::ColorShader::function1(float uv_x, float uv_y)
 {
    float result = 0.0f;
@@ -645,10 +736,8 @@ float shader::ColorShader::function1(float uv_x, float uv_y)
   return result;
 }
 
-
-/*
  * function2() - controlls the shape of the second object
- */
+
 float shader::ColorShader::function2(float uv_x, float uv_y)
 {
     float result = 0.0f;
@@ -665,9 +754,9 @@ float shader::ColorShader::function2(float uv_x, float uv_y)
     uv_y = 1.0f - uv_y;
     ngl::Vec2 pos = ngl::Vec2(uv_x * 10.0f - 5.0f, uv_y * 10.0f - 3.0f);
 
-    float bl1 = INTERSECT(INTERSECT(INTERSECT((pos.m_x + 1.0f),  (0.0f - pos.m_x)), 
+    float bl1 = INTERSECT(INTERSECT(INTERSECT((pos.m_x + 1.0f),  (0.0f - pos.m_x)),
                                               (pos.m_y - 2.0f)), (5.0f - pos.m_y));
-    float bl2 = INTERSECT(INTERSECT(INTERSECT((pos.m_y - 3.0f),  (4.0f - pos.m_y)), 
+    float bl2 = INTERSECT(INTERSECT(INTERSECT((pos.m_y - 3.0f),  (4.0f - pos.m_y)),
                                               (pos.m_x + 2.0f)), (1.0f - pos.m_x));
     float cross = UNION(bl1, bl2);
     result = cross;
@@ -684,6 +773,7 @@ float shader::ColorShader::function2(float uv_x, float uv_y)
 
   return result;
 }
+*/
 
 /*
  * function3() - controlls the bounding box insied of which space-time blending took place
@@ -694,29 +784,23 @@ float shader::ColorShader::function3(ngl::Vec2 uv, float time)
 
   float t_min = -10.0f;
   float t_max =  10.0f;
-  float K = (time - t_min) / (t_max - t_min);
+  float K, X_C, Y_C, R, ddd, f3;
 
-  float r1 = ( rad1 / resolution_x );
-  float r2 = ( rad2 / resolution_x );
+  K = (time - t_min) / (t_max - t_min);
 
-  float X_C = center1[0] + K * (center2[0] - center1[0]);
-  float Y_C = center1[1] + K * (center2[1] - center1[1]);
-  float R  = r1 + K * (r2 - r1);
+  X_C = center1[0] + K * (center2[0] - center1[0]);
+  Y_C = center1[1] + K * (center2[1] - center1[1]);
 
-  float ddd = R * R - std::pow( uv.m_x - X_C, 2.0f ) -
-                      std::pow( uv.m_y - Y_C, 2.0f );
+  R  = r1 + K * (r2 - r1);
 
-  float f3 = INTERSECT( INTERSECT( ddd, 10.0f + time ), ( 10.0f - time ) );
+  ddd = R * R - ( uv.m_x - X_C )*( uv.m_x - X_C ) -
+                ( uv.m_y - Y_C )*( uv.m_y - Y_C );
+
+  f3 = INTERSECT( INTERSECT( ddd, 10.0f + time ), ( 10.0f - time ) );
 
 #endif //USE_CONE_F3
 
 #ifdef USE_PYRAMID_F3
-
-  float rec1_w = static_cast<float>( rec1.width )  / resolution_x;
-  float rec1_h = static_cast<float>( rec1.height ) / resolution_y;
-
-  float rec2_w = static_cast<float>( rec2.width )  / resolution_y;
-  float rec2_h = static_cast<float>( rec2.height ) / resolution_x;
 
   float t_min = -10.0f;
   float t_max =  10.0f;
@@ -735,33 +819,9 @@ float shader::ColorShader::function3(ngl::Vec2 uv, float time)
 
 #endif //USE_PYRAMID_F3
 
-#ifdef USE_EGG_SHAPE_F3
-  uv.m_y = 1.0f - uv.m_y;
-  //ngl::Vec2 pos = ngl::Vec2(uv_x * 10.0f - 5.0f, uv_y * 10.0f - 3.0f);
-
-  float R = ((rad1 + rad2) / 2.0f) * static_cast<float>(resolution_x);
-  float a = R;
-
-  float dx_c = (center1[0] - center2[0]);
-  float dy_c = (center1[1] - center2[1]);
-  float f    = std::sqrt(dx_c * dx_c + dy_c * dy_c) / 2.0f;
-  float b    = std::sqrt(f*f + a*a);
-
-  float dx = uv.m_x - dx_c / 2.0f;
-  float dy = uv.m_y - dy_c / 2.0f;
-  float tx = std::exp(0.2f * uv.m_x);
-  float alpha = std::atan2(center2[1]-center1[1], center2[0]-center1[0]);
-
-  float dist = (std::pow(dx*std::cos(alpha) - dy*std::sin(alpha), 2.0f) / a*a)+
-               (std::pow(dx*std::sin(alpha) + dy*std::cos(alpha), 2.0f) / b*b) * tx - 1.0f;
-  float f3 = INTERSECT( INTERSECT( dist, 10.0f + time ), ( 10.0f - time ) );
-#endif
-
 #ifndef USE_CONE_F3
 #ifndef USE_PYRAMID_F3
-#ifndef USE_EGG_SHAPE_F3
   float f3 = INTERSECT(time + 10.0f, 10.0f - time);
-#endif
 #endif
 #endif // if not defined(USE_CONE_F3) || not defined(USE_PYRAMID_F3)
 
@@ -772,6 +832,9 @@ float shader::ColorShader::function3(ngl::Vec2 uv, float time)
 /*
  * functions below are providing color conversion rules between RGB/HSV color spaces;
  */
+#ifdef USE_OPENMP
+#pragma omp declare simd
+#endif
 void shader::ColorShader::convert_from_RGB(float *r, float *g, float *b)
 {
   switch (color_mode_name)
@@ -789,6 +852,9 @@ void shader::ColorShader::convert_from_RGB(float *r, float *g, float *b)
   }
 }
 
+#ifdef USE_OPENMP
+#pragma omp declare simd
+#endif
 void shader::ColorShader::convert_to_RGB(float *r, float *g, float *b)
 {
   switch (color_mode_name)
@@ -806,6 +872,9 @@ void shader::ColorShader::convert_to_RGB(float *r, float *g, float *b)
   }
 }
 
+#ifdef USE_OPENMP
+#pragma omp declare simd
+#endif
 void shader::ColorShader::convert_RGB_to_HSV(float *r, float *g, float *b)
 {
   float min, max, delta;
@@ -849,6 +918,9 @@ void shader::ColorShader::convert_RGB_to_HSV(float *r, float *g, float *b)
   *b = v;
 }
 
+#ifdef USE_OPENMP
+#pragma omp declare simd
+#endif
 void shader::ColorShader::convert_HSV_to_RGB(float *r, float *g, float *b)
 {
   int i;
@@ -911,6 +983,9 @@ void shader::ColorShader::convert_HSV_to_RGB(float *r, float *g, float *b)
   }
 }
 
+#ifdef USE_OPENMP
+#pragma omp declare simd
+#endif
 void shader::ColorShader::convert_RGB_to_CIELab(float *r, float *g, float *b)
 {
     //1 step is to convert RGB to XYZ color space
@@ -953,6 +1028,9 @@ void shader::ColorShader::convert_RGB_to_CIELab(float *r, float *g, float *b)
     *b = 200.0f * (var_Y - var_Z);
 }
 
+#ifdef USE_OPENMP
+#pragma omp declare simd
+#endif
 void shader::ColorShader::convert_CIELab_to_RGB(float *r, float *g, float *b)
 {
   // 1 step: converting CIELab to XYZ color space
@@ -994,20 +1072,3 @@ void shader::ColorShader::convert_CIELab_to_RGB(float *r, float *g, float *b)
   *g = var_G;
   *b = var_B;
 }
-
-#ifdef USE_AFFINE_TRANSFORMATIONS
-cv::Mat shader::ColorShader::update_affine_rotation_m(cv::Point2f sh_center, double step)
-{
-    angle +=step;
-    rot_affine_m = (cv::Mat_<double>(2 ,3) << 0, 0, 0, 0, 0, 0);
-    rot_affine_m.at<double>(0, 0) = std::cos(angle * M_PI / 180.0);
-    rot_affine_m.at<double>(0, 1) = std::sin(angle * M_PI / 180.0);
-    rot_affine_m.at<double>(0, 2) = (1.0 - std::cos(angle * M_PI / 180.0)) * sh_center.x - std::sin(angle * M_PI / 180.0) * sh_center.y;
-
-    rot_affine_m.at<double>(1, 0) = -std::sin(angle * M_PI / 180.0);
-    rot_affine_m.at<double>(1, 1) =  std::cos(angle * M_PI / 180.0);
-    rot_affine_m.at<double>(1, 2) =  std::sin(angle * M_PI / 180.0) * sh_center.x + (1.0 - std::cos(angle * M_PI / 180.0)) * sh_center.y;
-
-    return rot_affine_m;
-}
-#endif
