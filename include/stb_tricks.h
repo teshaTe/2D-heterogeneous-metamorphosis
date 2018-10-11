@@ -61,7 +61,7 @@ private:
   cv::Mat grayImg1, grayImg2;
   cv::Mat image1, image2;
 
-  int thresh = 70;
+  int thresh = 70; //35
   int max_thresh = 255;
   float total_st_x;
   float total_st_y;
