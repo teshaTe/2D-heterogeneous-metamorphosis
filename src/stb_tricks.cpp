@@ -1,6 +1,11 @@
 #include "include/stb_tricks.h"
 
 #include <opencv2/imgcodecs.hpp>
+
+#ifdef USE_DEBUG_INFO
+  #include <opencv2/highgui.hpp>
+#endif
+
 #include <iostream>
 
 stb_tricks::StbEnhancements::StbEnhancements(cv::Mat img1, cv::Mat img2)
@@ -238,6 +243,34 @@ void stb_tricks::StbEnhancements::create_circumcircle(int, void *)
         cv::approxPolyDP( cv::Mat(contours2[j]), contours_poly2[j], 3, true );
         cv::minEnclosingCircle( (cv::Mat)contours_poly2[j], center2[j], radius2[j] );
     }
+
+#ifdef USE_DEBUG_INFO
+
+    cv::RNG rng(12345);
+    cv::Mat drawing1 = cv::Mat::zeros(image1.rows, image1.cols, image1.type());
+    cv::Mat drawing2 = cv::Mat::zeros(image2.rows, image2.cols, image2.type());
+
+    for( int i = 0; i< contours1.size(); i++ )
+    {
+       cv::Scalar color = cv::Scalar( rng.uniform(0, 255), rng.uniform(0,255), rng.uniform(0,255) );
+       cv::drawContours( drawing1, contours_poly1, i, color, 2, 8, hierarchy1, 0, cv::Point() );
+       cv::circle( drawing1, center1[i], (int)radius1[i], color, 2, 8, 0);
+    }
+
+    for( int i = 0; i< contours2.size(); i++ )
+    {
+       cv::Scalar color = cv::Scalar( rng.uniform(0, 255), rng.uniform(0,255), rng.uniform(0,255) );
+       cv::drawContours( drawing2, contours_poly2, i, color, 2, 8, hierarchy2, 0, cv::Point() );
+       cv::circle( drawing2, center2[i], (int)radius2[i], color, 2, 8, 0);
+    }
+
+    cv::Mat blended_dst = cv::Mat::zeros(image1.rows, image2.cols, image2.type());
+    cv::addWeighted( drawing1, 0.5, drawing2, 0.5, 0.0, blended_dst);
+
+    cv::imshow("blended_image", blended_dst);
+    cv::imshow("image1", drawing1);
+    //cv::imshow("image2", drawing2);
+#endif
 }
 
 void stb_tricks::StbEnhancements::create_rectangle(int, void*)
