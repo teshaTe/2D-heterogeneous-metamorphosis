@@ -153,58 +153,490 @@ shader::ColorShader::ColorShader(int length, cv::Mat img1, cv::Mat img2,
 #endif //defined(USE_AFFINE_TRANSFORMATIONS) || defined(USE_CONE_F3) || defined(USE_PYRAMID_F3)
 }
 
-
-
-
 void shader::ColorShader::set_ai_coeffs()
 {
-
     std::vector<float> cen1, cen2;
     float r1, r2;
 
     stb_tricks::StbEnhancements stb(image1, image2, false);
     stb.get_max_circle(&r1, &r2, &cen1, &cen2);
-    float cx = (cen2[0]*static_cast<float>(resolution_x) - cen1[0]*static_cast<float>(resolution_x));
-    float cy = (cen2[1]*static_cast<float>(resolution_y) - cen1[1]*static_cast<float>(resolution_y));
-    float dist = std::sqrt(cx*cx + cy*cy);
 
-#if defined (USE_CONE_F3) || defined(USE_PYRAMID_F3)
-#ifdef USE_PYRAMID_F3
-    a1 = std::exp(dist / (2.0f*(r1 + r2)));
-    a2 = std::exp(dist / (2.0f*(r1 + r2)));
-    a3 = 0.017;
-    a0 = 2.5;
+    cx1 = cen1[0] ;
+    cy1 = cen1[1] ;
+    cx2 = cen2[0] ;
+    cy2 = cen2[1] ;
+    r1_uv = r1 / resolution_x;
+    r2_uv = r2 / resolution_x;
+
+    a1 = calc_a1_coeff();
+    a2 = a1;
+
+#ifdef USE_CONE_F3
+    a3 = std::min(r1_uv, r2_uv)*0.03126f;
+#elif defined (USE_PYRAMID_F3)
+    a3 = std::min(r1_uv, r2_uv)*0.13336f;
 #else
-    a2 = std::exp(dist / (2.0f * (r1 + r2)));
-    a1 = 0.7*a2;
-    a3 = 0.004;
-    a0 = 5.0;
+    a3 = 1.0f;
 #endif
+
+    std::vector<float> a0_interval = calc_a0_interval();
+    a0 = a0_interval[1];
+
+    std::cout << "a1 = a2 = " << a1 << std::endl;
+    std::cout << "     a3 = " << a3 << std::endl;
+    std::cout << "     a0 = " << a0 << std::endl;
+
+    //std::cout << "Enter a_0 suitable for you: ";
+    //std::cin >> a0; std::cout << std::endl;
+}
+
+bool shader::ColorShader::check_2circle_crosssection()
+{
+    float coef1 = cx1*cx1 + cy1*cy1 - r1_uv*r1_uv;
+    float coef2 = cx2*cx2 + cy2*cy2 - r2_uv*r2_uv;
+
+    float c1 = 4.0f*( (cx1 - cx2)*(cx1 - cx2) + (cy1 - cy2)*(cy1 - cy2) );
+    float c2 = (coef1 - coef2)*(coef1 - coef2) + cy1*cy1*(4.0f*coef2 - 8.0f*coef1) +
+               4.0f*cy1*cy2*(3.0f*coef1 - coef2) - 4.0f*coef1*cy2*cy2;
+    float c3 = 4.0f*coef1*(cx2 - cx1) + 4.0f*coef2*(cx1 - cx2) - 8.0f*cx2*(cy1*cy1 - cy1*cy2)
+                                                                - 8.0f*cx1*(cy2*cy2 - cy1*cy2);
+
+    float diskr = -4.0f*c1*c2 + c3*c3;
+
+    if(diskr < 0.0f || std::sqrt( (cx2-cx1)*(cx2-cx1) + (cy2-cy1)*(cy2-cy1)) < std::min(r1_uv, r2_uv)/2.0f )
+        return false;
+    else
+        return true;
+}
+
+float shader::ColorShader::calc_a1_coeff()
+{
+    //****************************************************************************************
+    //STEP I: find middle points of the line connected centers of two circles for estimating a1
+    float a1_fin;
+    float dist = std::sqrt( (cx2-cx1)*(cx2-cx1) + (cy2-cy1)*(cy2-cy1));
+    if( dist < 0.01f)
+    {
+        a1_fin = 1.0;
+    }
+    else {
+        //calculating point K1
+        //coeffs for K1x
+        float k = 1.0f / ( (cx1-cx2)*(cx1-cx2) + (cy1-cy2) * (cy1-cy2) );
+        float k1_1 = std::pow(cx1, 3.0f) - 2*cx1*cx1*cx2 + cx1*cx2*cx2 +
+                             cx1*cy1*cy1 - 2*cx1*cy1*cy2 + cx1*cy2*cy2;
+
+        float k1_2 = std::pow(cx1, 4.0f) - 4*std::pow(cx1, 3.0f)*cx2 +
+                     6*cx1*cx1*cx2*cx2   - 4*cx1*std::pow(cx2, 3.0f) +
+                     std::pow(cx2, 4.0f) + cx1*cx1*cy1*cy1 -
+                     2*cx1*cx2*cy1*cy1   + cx2*cx2*cy1*cy1 -
+                     2*cx1*cx1*cy1*cy2   + 4*cx1*cx2*cy1*cy2 -
+                     2*cx2*cx2*cy1*cy2   + cx1*cx1*cy2*cy2 -
+                     2*cx1*cx2*cy2*cy2   + cx2*cx2*cy2*cy2;
+
+        //coeffs for K1y
+        float k1_3 = std::pow(cx1, 3.0f)*cy1 - 2*cx1*cx1*cx2*cy1 + cx1*cx2*cx2*cy1 +
+                     cx1*std::pow(cy1, 3.0f) - std::pow(cx1, 3.0f)*cy2 +
+                     2*cx1*cx1*cx2*cy2       - cx1*cx2*cx2*cy2 - 3*cx1*cy1*cy1*cy2 +
+                     3*cx1*cy1*cy2*cy2       - cx1*std::pow(cy2, 3.0f);
+
+        float K1x_a = k * (k1_1 - r1_uv * std::sqrt(k1_2));
+        float K1y_a = ( 1.0f/( cx1 - cx2 ) ) * ( -cx2*cy1 + cx1*cy2 + k * ( k1_3 - (cy1-cy2) * r1_uv * std::sqrt(k1_2) ));
+
+        float K1x_b = k * (k1_1 + r1_uv * std::sqrt(k1_2));
+        float K1y_b = ( 1.0f/( cx1 - cx2 ) ) * ( -cx2*cy1 + cx1*cy2 + k * ( k1_3 + (cy1-cy2) * r1_uv * std::sqrt(k1_2) ));
+
+        //****************************************************************************************
+        //calculating point K2
+        //coeffs for K2x1
+        float k2_1 = cx1*cx1*cx2 - 2*cx1*cx2*cx2 + std::pow(cx2, 3.0f) +
+                     cx2*cy1*cy1 - 2*cx2*cy1*cy2 + cx2*cy2*cy2;
+        float k2_2 = k1_2;
+
+        //coeffs for K2y
+        float k2_3 = cx1*cx1*cx2*cy1         - 2*cx1*cx2*cx2*cy1 +
+                     std::pow(cx2, 3.0f)*cy1 + cx2*std::pow(cy1, 3.0f) -
+                     cx1*cx1*cx2*cy2         + 2*cx1*cx2*cx2*cy2 - std::pow(cx2, 3.0f)*cy2 -
+                     3*cx2*cy1*cy1*cy2       + 3*cx2*cy1*cy2*cy2 -
+                     cx2*std::pow(cy2, 3.0f);
+
+        float K2x_a = k * ( k2_1 - r2_uv * std::sqrt(k2_2) );
+        float K2y_a = ( 1.0f/( cx1 - cx2 ) ) * ( -cx2*cy1 + cx1*cy2 + k * ( k2_3 - (cy1-cy2) * r2_uv * std::sqrt(k2_2) ));
+
+        float K2x_b = k * ( k2_1 + r2 * std::sqrt(k2_2) );
+        float K2y_b = ( 1.0f/( cx1 - cx2 ) ) * ( -cx2*cy1 + cx1*cy2 + k * ( k2_3 + (cy1-cy2) * r2_uv * std::sqrt(k2_2) ));
+
+        //calculating norm of the K1K2 vector
+        float norm1 = (K2x_a - K1x_a)*(K2x_a - K1x_a) + (K2y_a - K1y_a)*(K2y_a - K1y_a);
+        float norm2 = (K2x_b - K1x_b)*(K2x_b - K1x_b) + (K2y_b - K1y_b)*(K2y_b - K1y_b);
+
+        float norm, K2x, K2y, K1x, K1y;
+        if(norm1 < norm2)
+        {
+            norm = norm1;
+            K1x = K1x_a; K1y = K1y_a;
+            K2x = K2x_a; K2y = K2y_a;
+        }
+        else
+        {
+            norm = norm2;
+            K1x = K1x_b; K1y = K1y_b;
+            K2x = K2x_b; K2y = K2y_b;
+        }
+
+        //calculating f1 and f2 in these points
+        float f1_k = r1_uv - std::sqrt((K2x - cx1)*(K2x - cx1)) - std::sqrt((K2y - cy1)*(K2y - cy1));
+        float f2_k = r2_uv - std::sqrt((K1x - cx2)*(K1x - cx2)) - std::sqrt((K1y - cy2)*(K1y - cy2));
+
+        //float f1_k = (K2x - cx1)*(K2x - cx1) + (K2y - cy1)*(K2y - cy1) - r1_uv*r1_uv;
+        //float f2_k = (K1x - cx2)*(K1x - cx2) + (K1y - cy2)*(K1y - cy2) - r2_uv*r2_uv;
+
+        a1_fin = std::sqrt( (f1_k*f1_k + f2_k*f2_k) / norm );
+    }
+    return a1_fin;
+}
+
+std::vector<float> shader::ColorShader::calc_a0_interval()
+{
+    float cx_min = std::min(cx1, cx2);
+    if( cx_min == cx1 )
+    {
+        x_min = cx_min - r1_uv;
+        x_max = cx2 + r2_uv;
+    }
+    else
+    {
+        x_min = cx_min - r2_uv;
+        x_max = cx1 + r1_uv;
+    }
+
+    float cy_min = std::min(cy1, cy2);
+    if(cy_min == cy1 )
+    {
+        y_min = cy_min - r1_uv;
+        y_max = cy2 + r2_uv;
+    }
+    else
+    {
+        y_min = cy_min - r2_uv;
+        y_max = cy1 + r1_uv;
+    }
+
+    if(x_min < 0.0f) x_min = 0.0f;
+    if(x_max > 1.0f) x_max = 1.0f;
+    if(y_min < 0.0f) y_min = 0.0f;
+    if(y_max > 1.0f) y_max = 1.0f;
+
+    //intervals for sqrt[x*x-2xx1+x1*x1] and sqrt[y*y-2yx1+y1*y1]; sqrt[x*x-2xx2+x2*x2] and sqrt[y*y-2yx2+y2*y2]
+    float x1_min = x_min*x_max - 2.0f*cx1*x_max + cx1*cx1;
+    float y1_min = y_min*y_max - 2.0f*cy1*y_max + cy1*cy1;
+    float x2_min = x_min*x_max - 2.0f*cx2*x_max + cx2*cx2;
+    float y2_min = y_min*y_max - 2.0f*cy2*y_max + cy2*cy2;
+
+    if(x1_min < 0.0f) x1_min = 0.0f;
+    if(y1_min < 0.0f) y1_min = 0.0f;
+    if(x2_min < 0.0f) x2_min = 0.0f;
+    if(y2_min < 0.0f) y2_min = 0.0f;
+
+    float x1_max = x_max*x_max - 2.0f*cx1*x_min + cx1*cx1;
+    float y1_max = y_max*y_max - 2.0f*cy1*y_min + cy1*cy1;
+    float x2_max = x_max*x_max - 2.0f*cx2*x_min + cx2*cx2;
+    float y2_max = y_max*y_max - 2.0f*cy2*y_min + cy2*cy2;
+
+    //intervals for function f1 and f2 represented as circle equations
+    fun1 = { std::sqrt(x1_min) + std::sqrt(y1_min) - r1_uv,
+             std::sqrt(x1_max) + std::sqrt(y1_max) - r1_uv };
+    fun2 = { std::sqrt(x2_min) + std::sqrt(y2_min) - r2_uv,
+             std::sqrt(x2_max) + std::sqrt(y2_max) - r2_uv };
+
+    //f1*f1 and f2*f2 check if the min value is positive, otherwise it is 0.0
+    float fun11_min = fun1[0]*fun1[1];
+    float fun22_min = fun2[0]*fun2[1];
+
+    if( fun11_min < 0.0f ) fun11_min = 0.0f;
+    if( fun22_min < 0.0f ) fun22_min = 0.0f;
+
+    fun11 = { fun11_min, fun1[1]*fun1[1] };
+    fun22 = { fun22_min, fun2[1]*fun2[1] };
+
+    //checking whether sum under the square root is positive: sqrt(f1*f1 + f2*f2)
+
+    f11f22_sum    = { fun11[0] + fun22[0], fun11[1] + fun22[1] };
+    SqrF12F22_sum = { std::sqrt(f11f22_sum[0]), std::sqrt(f11f22_sum[1]) };
+
+    //calculating final estimation interval for a0
+    f1f2_sum      = { fun1[0] + fun2[0] , fun1[1] + fun2[1] };
+
+
+    std::vector<float> a0_bot, a0_top;
+
+    if(check_2circle_crosssection())
+    {
+        float dy = ( cy2 - cy1 );
+        float dx = ( cx2 - cx1 );
+        float dr = ( r2_uv - r1_uv );
+        float d  = std::sqrt( dx*dx + dy*dy );
+
+        float X = dx / d;
+        float Y = dy / d;
+        float R = dr / d;
+
+        //for top tangential line
+        A1 = R*X - Y*std::sqrt( 1.0f - R*R );
+        B1 = R*Y + X*std::sqrt( 1.0f - R*R );
+        C1 = r1_uv - ( A1*cx1 + B1*cy1 );
+
+        //for bottom tangential line
+        A2 = R*X + Y*std::sqrt( 1.0f - R*R );
+        B2 = R*Y - X*std::sqrt( 1.0f - R*R );
+        C2 = r1_uv - ( A2*cx1 + B2*cy1 );
+
+        std::vector<float> AA = { f1f2_sum[0] + SqrF12F22_sum[0], f1f2_sum[1] + SqrF12F22_sum[1] };
+        std::vector<float> BB = { 1.0f + (1.0f/(a1*a1))*f11f22_sum[0], 1.0f + (1.0f/(a1*a1))*f11f22_sum[1]};
+        std::vector<float> CC1 = { A1*x_min + B1*y_min + C1, A1*x_max + B1*y_max + C1 };
+        std::vector<float> CC2 = { A2*x_min + B2*y_min + C2, A2*x_max + B2*y_max + C2 };
+
+        std::vector<float> DD1 = { CC1[0] - AA[1], CC1[1] - AA[0] };
+        std::vector<float> DD2 = { CC2[0] - AA[1], CC2[1] - AA[0] };
+
+        //found bottom interval for a0
+        a0_bot = { min4(DD2[0]*BB[0], DD2[0]*BB[1], DD2[1]*BB[0], DD2[1]*BB[1]),
+                   max4(DD2[0]*BB[0], DD2[0]*BB[1], DD2[1]*BB[0], DD2[1]*BB[1]) };
+
+        a0_top = { min4(DD1[0]*BB[0], DD1[0]*BB[1], DD1[1]*BB[0], DD1[1]*BB[1]),
+                   max4(DD1[0]*BB[0], DD1[0]*BB[1], DD1[1]*BB[0], DD1[1]*BB[1]) };
+
+        float a0_min, a0_max;
+        if(a0_bot[0] < 0.0f && a0_top[0] < 0.0f && a0_bot[1] > 0.0f)
+            a0_min = a0_bot[1];
+        else
+            a0_min = a0_bot[0];
+
+        a0_max = a0_top[1];
+
+        a0_int = { a0_min, a0_max };
+
+        std::cout << "bottom interval [1] for a0 [ " << a0_bot[0] << " , " << a0_bot[1] << " ]" << std::endl;
+        std::cout << "top    interval [2] for a0 [ " << a0_top[0] << " , " << a0_top[1] << " ]" << std::endl;
+        std::cout << "final  interval for a0 [ "     << a0_min    << " , " << a0_max    << " ]" << std::endl;
+    }
+    else
+    {
+        float cx, cy, r_uv;
+        if(std::max(r1_uv, r2_uv) == r1_uv)
+        {
+            cx = cx1;
+            cy = cy1;
+            r_uv = r1_uv;
+        }
+        else
+        {
+            cx = cx2;
+            cy = cy2;
+            r_uv = r2_uv;
+        }
+
+        std::vector<float> AA = { f1f2_sum[0] + SqrF12F22_sum[0], f1f2_sum[1] + SqrF12F22_sum[1] };
+        std::vector<float> BB = { 1.0f + (1.0f/(a1*a1))*f11f22_sum[0], 1.0f + (1.0f/(a1*a1))*f11f22_sum[1]};
+        std::vector<float> CC = { (x_min - cx)*(x_max - cx) + (y_min - cy)*(y_max - cy) - r_uv*r_uv,
+                                  (x_max - cx)*(x_max - cx) + (y_max - cy)*(y_max - cy) - r_uv*r_uv };
+        std::vector<float> DD = { CC[0] - AA[1], CC[1] - AA[0] };
+
+        a0_int = { min4(DD[0]*BB[0], DD[1]*BB[0], DD[0]*BB[1], DD[1]*BB[1]),
+                   max4(DD[0]*BB[0], DD[1]*BB[0], DD[0]*BB[1], DD[1]*BB[1]) };
+
+        std::cout << "final  interval for a0 [ " << a0_int[0]    << " , " << a0_int[1]    << " ]" << std::endl;
+    }
+
+
+    return a0_int;
+}
+
+/*std::vector<float> shader::ColorShader::calc_a3_interval(float A, float B, float C)
+{
+    int first_enter = 0;
+    int second_enter = 0;
+
+#ifdef USE_PYRAMID_F3
+
+#elif USE_CONE_F3
+
 #else
+    float f3_min, f3_max;
 
-    a1 = std::exp(dist / (2.0f*(r1 + r2)));
-    a2 = std::exp(dist / (2.0f*(r1 + r2)));
-    a3 = a1*std::exp(-0.65f*std::exp(-0.7f*a1));
+    for (int i =0; i< 100; i++)
+    {
+       float t = ( 20.0f / 0.36f ) * ( i/100.0f - 0.01f ) * ( i/100.0f - 0.01f ) - 10.0f;
+       if (INTERSECT(t + 10.0f, 10.0f - t) > 0.0f && first_enter < 1 )
+       {
+          f3_min =INTERSECT(t + 10.0f, 10.0f - t);
+          t_min = t;
+          first_enter++;
+       }
+       else if(INTERSECT(t + 10.0f, 10.0f - t) < 0.0f && second_enter < 1)
+       {
+           t_max = ( 20.0f / 0.36f ) * ( (i-2)/100.0f - 0.01f ) * ( (i-2)/100.0f - 0.01f ) - 10.0f;
+           f3_max = INTERSECT(t_max + 10.0f, 10.0f - t_max);
+           second_enter++;
+           break;
+       }
+    }
+    std::vector<float> func3   = { f3_min, f3_max };
 
-    if(a3 < 1.0f)
-      a3 = 1.0f;
+    if(func3[0] < 0.0f ) func3[0] = 0.0f;
 
-    //for understanding what is going on here look at the picture
-    //yA is the y coordinate of A1' point from the picture
-    //xB is the x coordinate of B1' point from the picture
-    float yA = 20.0f - std::sqrt( (a1 + 10.0f) * (a1 + 10.0f) + (10.0f - a1) * (10.0f - a1));
-    float xB = std::sqrt(0.5f * ( (20.0f - a1) * (20.0f - a1) - 200.0f ) );
+    float func1_min_a = (x_min-cx1)*(x_max-cx1);
+    float func1_min_b = (y_min-cy1)*(y_max-cy1);
+    float func2_min_a = (x_min-cx2)*(x_max-cx2);
+    float func2_min_b = (y_min-cy2)*(y_max-cy2);
+    if(func1_min_a < 0.0f) func1_min_a = 0.0f;
+    if(func1_min_b < 0.0f) func1_min_b = 0.0f;
+    if(func2_min_a < 0.0f) func2_min_a = 0.0f;
+    if(func2_min_b < 0.0f) func2_min_b = 0.0f;
 
-    //xCC, yCC - coordinates of intersection of the A1'B1' and OC lines
-    float k1  = xB * yA - a2 * a1;
-    float k2  = xB - a2 - a1 + yA;
+    std::vector<float> func1 = { std::sqrt(func1_min_a) + std::sqrt(func1_min_b) - r1_uv,
+                                 std::sqrt((x_max-cx1)*(x_max-cx1)) + std::sqrt((y_max-cy1)*(y_max-cy1)) - r1_uv };
 
-    float yCC = k1 / k2;
-    float xCC = yCC;
+    std::vector<float> func2 = { std::sqrt(func2_min_a) + std::sqrt(func2_min_b) - r2_uv,
+                                 std::sqrt((x_max-cx2)*(x_max-cx2)) + std::sqrt((y_max-cy2)*(y_max-cy2)) - r2_uv };
 
-    a0 = std::sqrt(yCC*yCC + xCC*xCC);
+    std::vector<float> sumF1F2    = { func1[0]+func2[0], func1[1]+func2[1] };
+
+    std::vector<float> sum_F11F22 = { func1[0]*func1[1] + func2[0]*func2[1], func1[1]*func1[1] + func2[1]*func2[1] };
+    if (sum_F11F22[0] < 0.0f) sum_F11F22[0] = 0.0f;
+
+    float dist = std::sqrt((cx2-cx1)*(cx2-cx1) + (cy2-cy1)*(cy2-cy1) );
+
+    std::vector<float> chisl = { a1*a1*dist*f3_min*f3_max, a1*a1*dist*f3_max*f3_max };
+
+    std::vector<float> znam = { sum_F11F22[0]*r1_uv + sum_F11F22[0]*r2_uv - sum_F11F22[1]*dist ,
+                                sum_F11F22[1]*r1_uv + sum_F11F22[1]*r2_uv - sum_F11F22[0]*dist };
+
+    std::vector<float> a3_int_2 = { min4(chisl[0] / znam[0], chisl[1] / znam[0], chisl[0] / znam[1], chisl[1] / znam[1]),
+                                  max4(chisl[0] / znam[0], chisl[1] / znam[0], chisl[0] / znam[1], chisl[1] / znam[1])};
+
+    if(a3_int_2[0] < 0.0f) a3_int_2[0] = 0.0f;
+
+    std::vector<float> a3_int = {std::sqrt(a3_int_2[0]), std::sqrt(a3_int_2[1])};
+
+   /* std::vector<float> sumF1F2SqrF1F2 = { sumF1F2[0] + std::sqrt(sum_F11F22[0]), sumF1F2[1] + std::sqrt(sum_F11F22[1]) };
+    *
+    *  std::vector<float> f3_2  =  { func3[0]*func3[1], func3[1]*func3[1] };
+    if(f3_2[0] < 0.0f) f3_2[0] = 0.0f;
+
+
+    std::vector<float> f1f3_2 = { min4(func1[0]*f3_2[0], func1[0]*f3_2[1], func1[1]*f3_2[0], func1[1]*f3_2[1]),
+                                  max4(func1[0]*f3_2[0], func1[0]*f3_2[1], func1[1]*f3_2[0], func1[1]*f3_2[1]) };
+    std::vector<float> f2f3_2 = { min4(func2[0]*f3_2[0], func2[0]*f3_2[1], func2[1]*f3_2[0], func2[1]*f3_2[1]),
+                                  max4(func2[0]*f3_2[0], func2[0]*f3_2[1], func2[1]*f3_2[0], func2[1]*f3_2[1]) };
+
+    std::vector<float> xf3_2  = { min4(x_min*f3_2[0], x_min*f3_2[1], x_max*f3_2[0], x_max*f3_2[1]),
+                                  max4(x_min*f3_2[0], x_min*f3_2[1], x_max*f3_2[0], x_max*f3_2[1]) };
+    std::vector<float> yf3_2  = { min4(y_min*f3_2[0], y_min*f3_2[1], y_max*f3_2[0], y_max*f3_2[1]),
+                                  max4(y_min*f3_2[0], y_min*f3_2[1], y_max*f3_2[0], y_max*f3_2[1]) };
+
+    std::vector<float> SqrSumF12F22F3_2 = { min4(std::sqrt(sum_F11F22[0])*f3_2[0], std::sqrt(sum_F11F22[0])*f3_2[1],
+                                                 std::sqrt(sum_F11F22[1])*f3_2[0], std::sqrt(sum_F11F22[1])*f3_2[1]),
+                                            max4(std::sqrt(sum_F11F22[0])*f3_2[0], std::sqrt(sum_F11F22[0])*f3_2[1],
+                                                 std::sqrt(sum_F11F22[1])*f3_2[0], std::sqrt(sum_F11F22[1])*f3_2[1]) };
+
+    std::vector<float> SumF12F22F3_2    = { min4((1.0f/(a1*a1))*sum_F11F22[0]*f3_2[0], (1.0f/(a1*a1))*sum_F11F22[1]*f3_2[0],
+                                                 (1.0f/(a1*a1))*sum_F11F22[0]*f3_2[1], (1.0f/(a1*a1))*sum_F11F22[1]*f3_2[1]),
+                                            max4((1.0f/(a1*a1))*sum_F11F22[0]*f3_2[0], (1.0f/(a1*a1))*sum_F11F22[1]*f3_2[0],
+                                                 (1.0f/(a1*a1))*sum_F11F22[0]*f3_2[1], (1.0f/(a1*a1))*sum_F11F22[1]*f3_2[1]) };
+
+    std::vector<float> f1SumF11F22      = { min4((1.0f/(a1*a1))*sum_F11F22[0]*func1[0], (1.0f/(a1*a1))*sum_F11F22[1]*func1[0],
+                                                 (1.0f/(a1*a1))*sum_F11F22[0]*func1[1], (1.0f/(a1*a1))*sum_F11F22[1]*func1[1]),
+                                            max4((1.0f/(a1*a1))*sum_F11F22[0]*func1[0], (1.0f/(a1*a1))*sum_F11F22[1]*func1[0],
+                                                 (1.0f/(a1*a1))*sum_F11F22[0]*func1[1], (1.0f/(a1*a1))*sum_F11F22[1]*func1[1]) };
+
+    std::vector<float> f2SumF11F22      = { min4((1.0f/(a1*a1))*sum_F11F22[0]*func2[0], (1.0f/(a1*a1))*sum_F11F22[1]*func2[0],
+                                                 (1.0f/(a1*a1))*sum_F11F22[0]*func2[1], (1.0f/(a1*a1))*sum_F11F22[1]*func2[1]),
+                                            max4((1.0f/(a1*a1))*sum_F11F22[0]*func2[0], (1.0f/(a1*a1))*sum_F11F22[1]*func2[0],
+                                                 (1.0f/(a1*a1))*sum_F11F22[0]*func2[1], (1.0f/(a1*a1))*sum_F11F22[1]*func2[1]) };
+
+    std::vector<float> xSumF11F22       = { min4((1.0f/(a1*a1))*sum_F11F22[0]*x_min, (1.0f/(a1*a1))*sum_F11F22[1]*x_min,
+                                                 (1.0f/(a1*a1))*sum_F11F22[0]*x_max, (1.0f/(a1*a1))*sum_F11F22[1]*x_max),
+                                            max4((1.0f/(a1*a1))*sum_F11F22[0]*x_min, (1.0f/(a1*a1))*sum_F11F22[1]*x_min,
+                                                 (1.0f/(a1*a1))*sum_F11F22[0]*x_max, (1.0f/(a1*a1))*sum_F11F22[1]*x_max) };
+
+    std::vector<float> ySumF11F22       = { min4((1.0f/(a1*a1))*sum_F11F22[0]*y_min, (1.0f/(a1*a1))*sum_F11F22[1]*y_min,
+                                                 (1.0f/(a1*a1))*sum_F11F22[0]*y_max, (1.0f/(a1*a1))*sum_F11F22[1]*y_max),
+                                            max4((1.0f/(a1*a1))*sum_F11F22[0]*y_min, (1.0f/(a1*a1))*sum_F11F22[1]*y_min,
+                                                 (1.0f/(a1*a1))*sum_F11F22[0]*y_max, (1.0f/(a1*a1))*sum_F11F22[1]*y_max) };
+
+    std::vector<float> sumF12SqrSumF11F22  = { min4((1.0f/(a1*a1))*sum_F11F22[0]*std::sqrt(sum_F11F22[0]), (1.0f/(a1*a1))*sum_F11F22[1]*std::sqrt(sum_F11F22[0]),
+                                                    (1.0f/(a1*a1))*sum_F11F22[0]*std::sqrt(sum_F11F22[1]), (1.0f/(a1*a1))*sum_F11F22[1]*std::sqrt(sum_F11F22[1])),
+                                               max4((1.0f/(a1*a1))*sum_F11F22[0]*std::sqrt(sum_F11F22[0]), (1.0f/(a1*a1))*sum_F11F22[1]*std::sqrt(sum_F11F22[0]),
+                                                    (1.0f/(a1*a1))*sum_F11F22[0]*std::sqrt(sum_F11F22[1]), (1.0f/(a1*a1))*sum_F11F22[1]*std::sqrt(sum_F11F22[1])) };
+
+    //intermediate calculations for chislitel
+    std::vector<float> mem2 = { 9.0f*a0*a0*( (A*x_min + B*y_min) - sumF1F2SqrF1F2[1] + C ),
+                                9.0f*a0*a0*( (A*x_max + B*y_max) - sumF1F2SqrF1F2[0] + C ) };
+
+    //sqrt( 108*(...)^3 + ...)
+    std::vector<float> mem3   = { a0*(sumF1F2SqrF1F2[0] - (A*x_max + B*y_max) - C),
+                                  a0*(sumF1F2SqrF1F2[1] - (A*x_min + B*y_min) - C) };
+
+    float mem3_2 = std::pow( std::max(-mem3[0], mem3[1]), 2.0f);
+    std::vector<float> mem3_3 = { 108.0f*mem3_2*mem3[0] , 108.0f*mem3_2*mem3[1] };
+
+    //sqrt(.. + (...)^2 )
+    std::vector<float> mem4   = { 54.0f*a0*a0*((A*x_min + B*y_min) - sumF1F2SqrF1F2[1] + C),
+                                  54.0f*a0*a0*((A*x_max + B*y_max) - sumF1F2SqrF1F2[0] + C) };
+
+    std::vector<float> mem4_2 = { mem4[0]*mem4[1], mem4[1]*mem4[1] };
+    if(mem4_2[0] < 0.0f) mem4_2[0] = 0.0f;
+
+    //sqrt( (...)^2 - (...)^3) as 108 is with minus
+    float sqr_min_diff = mem4_2[0] - mem3_3[1];
+    if(sqr_min_diff < 0.0f) sqr_min_diff = 0.0f;
+
+    std::vector<float> mem5 = { (1.0f/6.0f) * std::sqrt( sqr_min_diff ), (1.0f/6.0f) * std::sqrt( mem4_2[1] - mem3_3[0] ) };
+    // sqrt caclulation finished.
+
+    // summing ( ... + sqrt(...) )^1/3 - first square root
+    std::vector<float> mem6a = { std::cbrt(  mem2[0] + mem5[0] ), std::cbrt(mem2[1] + mem5[1]) };
+
+    // summing ( ... + sqrt(...) )^2/3 - second square root
+    std::vector<float> mem6b = { std::cbrt( (mem2[0] + mem5[0])*(mem2[1] + mem5[1])),
+                                 std::cbrt( (mem2[1] + mem5[1])*(mem2[1] + mem5[1]))};
+    if ( mem6b[0] < 0.0f ) mem6b[0] = 0.0f;
+
+    //intermediate calculations for znamenatel
+    std::vector<float> mem7 = { std::cbrt(9.0f)*a0*( f1SumF11F22[0] + f2SumF11F22[0] + sumF12SqrSumF11F22[0] -
+                                C*(1.0f/(a1*a1))*sum_F11F22[1] - ( A*xSumF11F22[1] + B*ySumF11F22[1] )),
+                                std::cbrt(9.0f)*a0*( f1SumF11F22[1] + f2SumF11F22[1] + sumF12SqrSumF11F22[1] -
+                                C*(1.0f/(a1*a1))*sum_F11F22[0] - ( A*xSumF11F22[0] + B*ySumF11F22[0] )) };
+
+    //final members of the final estimated function
+    std::vector<float> mem1_fin  = { std::cbrt(9.0f)*a0*( C*f3_2[0] - f1f3_2[1] - f2f3_2[1] -
+                                     SqrSumF12F22F3_2[1] + A*xf3_2[0] + B*yf3_2[0]),
+                                     std::cbrt(9.0f)*a0*( C*f3_2[1] - f1f3_2[0] - f2f3_2[0] -
+                                     SqrSumF12F22F3_2[0] + A*xf3_2[1] + B*yf3_2[1]) };
+
+    std::vector<float> mem6a_fin = { 3.0f*a0*min4(f3_2[0]*mem6a[0], f3_2[0]*mem6a[1], f3_2[1]*mem6a[0], f3_2[1]*mem6a[1] ),
+                                     3.0f*a0*max4(f3_2[0]*mem6a[0], f3_2[0]*mem6a[1], f3_2[1]*mem6a[0], f3_2[1]*mem6a[1]) };
+
+    std::vector<float> mem6b_fin = { std::cbrt(3.0f)*min4(f3_2[0]*mem6b[0], f3_2[0]*mem6b[1], f3_2[1]*mem6b[0], f3_2[1]*mem6b[1] ),
+                                     std::cbrt(3.0f)*max4(f3_2[0]*mem6b[0], f3_2[0]*mem6b[1], f3_2[1]*mem6b[0], f3_2[1]*mem6b[1]) };
+
+    //znamenatel
+    std::vector<float> mem7_fin = { std::cbrt(3.0f)*min4((1.0f/(a1*a1))*sum_F11F22[0]*mem6b[0], (1.0f/(a1*a1))*sum_F11F22[0]*mem6b[1],
+                                                         (1.0f/(a1*a1))*sum_F11F22[1]*mem6b[0], (1.0f/(a1*a1))*sum_F11F22[1]*mem6b[1] ),
+                                    std::cbrt(3.0f)*max4((1.0f/(a1*a1))*sum_F11F22[0]*mem6b[0], (1.0f/(a1*a1))*sum_F11F22[0]*mem6b[1],
+                                                         (1.0f/(a1*a1))*sum_F11F22[1]*mem6b[0], (1.0f/(a1*a1))*sum_F11F22[1]*mem6b[1]) };
+
+    std::vector<float> chisl_fin = { mem1_fin[0] + mem6a_fin[0] - mem6b_fin[1], mem1_fin[1] + mem6a_fin[1] - mem6b_fin[0] };
+    std::vector<float> znam_fin  = { mem7[0] + mem7_fin[0], mem7[1] + mem7_fin[1] };
+
+    std::vector<float> a3_int = { min4(chisl_fin[0] / znam_fin[0], chisl_fin[1] / znam_fin[0], chisl_fin[0] / znam_fin[1], chisl_fin[1] / znam_fin[1]),
+                                  max4(chisl_fin[0] / znam_fin[0], chisl_fin[1] / znam_fin[0], chisl_fin[0] / znam_fin[1], chisl_fin[1] / znam_fin[1])};
+
+    return a3_int;
 #endif
 }
+
 
 /*
  * obtain_color() - function, which obtaining the color of the pixel from the loaded picture;
@@ -276,8 +708,8 @@ ngl::Vec4 shader::ColorShader::BB_shade_surface(ngl::Vec2 uv, float time)
   f1 = smooth_cylynder1(time, fun1);
   f2 = smooth_cylynder2(time, fun2);
 #else
-  fun1 = function1(uv.m_x, uv.m_y);
-  fun2 = function2(uv.m_x, uv.m_y);
+  fun1 = F1[static_cast<int>(uv.m_x*resolution_x) + static_cast<int>(uv.m_y*resolution_y*resolution_x)];
+  fun2 = F2[static_cast<int>(uv.m_x*resolution_x) + static_cast<int>(uv.m_y*resolution_y*resolution_x)];
 
   f1 = INTERSECT(fun1, -time);
   f2 = INTERSECT(fun2, (time - 1.0f));
@@ -339,31 +771,26 @@ ngl::Vec4 shader::ColorShader::BB_shade_surface(ngl::Vec2 uv, float time)
   return surf_col;
 }
 
-double shader::ColorShader::smooth_cylynder1(float time, float fun)
+float shader::ColorShader::smooth_cylynder1(float time, float fun)
 {
 #if defined (USE_PYRAMID_F3) || defined(USE_CONE_F3)
 #ifdef USE_PYRAMID_F3
-    float b0 = -0.3;
+    b1_0 = f3_pyr_1;
 #else
-    float b0 = -0.8;
+    b1_0 = f3_cone_1;
 #endif
-#else
-    float b0 = -0.3;
 #endif
-    float b1 = 1.0;
-    float b2 = 1.0;
-    float b3 = 1.0;
 
     float f1 = fun;
     float f2 = -time;
     float f3 =  time + 5.0f;
 
-    float r1 = (f1/b1)*(f1/b1) + (f2/b2)*(f2/b2);
+    float r1 = (f1/b1_1)*(f1/b1_1) + (f2/b1_2)*(f2/b1_2);
     float r2 = 0.0f;
 
     if( f3 > 0.0f )
     {
-      r2 = (f3/b3) * (f3/b3);
+      r2 = (f3/b1_3) * (f3/b1_3);
     }
 
     float rr = 0.0f;
@@ -375,39 +802,33 @@ double shader::ColorShader::smooth_cylynder1(float time, float fun)
     float d = 0.0f;
     if( rr < 1.0f )
     {
-      d = b0 * (1.0f - rr)*(1.0f - rr)*(1.0f - rr) / (1.0f + rr);
+      d = b1_0 * (1.0f - rr)*(1.0f - rr)*(1.0f - rr) / (1.0f + rr);
     }
 
     float blending_result = INTERSECT(f1, f2) + d;
     return blending_result;
 }
 
-double shader::ColorShader::smooth_cylynder2(float time, float fun)
+float shader::ColorShader::smooth_cylynder2(float time, float fun)
 {
 #if defined (USE_PYRAMID_F3) || defined(USE_CONE_F3)
 #ifdef USE_PYRAMID_F3
-    float b0 = -0.5;
+    float b2_0 = f3_pyr_2;
 #else
-    float b0 = -0.5;
+    float b2_0 = f3_cone_2;
 #endif
-#else
-    float b0 = -0.5;
 #endif
-
-    float b1 = 1.0;
-    float b2 = 1.0;
-    float b3 = 1.0;
 
     float f1 = fun;
     float f2 = time - 1.0f;
     float f3 = 5.0f - time;
 
-    float r1 = (f1/b1)*(f1/b1) + (f2/b2)*(f2/b2);
+    float r1 = (f1/b2_1)*(f1/b2_1) + (f2/b2_2)*(f2/b2_2);
     float r2 = 0.0f;
 
     if( f3 > 0.0f )
     {
-      r2 = (f3/b3) * (f3/b3);
+      r2 = (f3/b2_3) * (f3/b2_3);
     }
 
     float rr = 0.0f;
@@ -419,12 +840,13 @@ double shader::ColorShader::smooth_cylynder2(float time, float fun)
     float d = 0.0f;
     if( rr < 1.0f )
     {
-      d = b0 * (1.0f - rr)*(1.0f - rr)*(1.0f - rr) / (1.0f + rr);
+      d = b2_0 * (1.0f - rr)*(1.0f - rr)*(1.0f - rr) / (1.0f + rr);
     }
 
     float blending_result = INTERSECT(f1, f2) + d;
     return blending_result;
 }
+
 
 void shader::ColorShader::blend_colors(ngl::Vec2 uv, ngl::Vec4 *col1, ngl::Vec4 *col2, float f1, float f2)
 {
