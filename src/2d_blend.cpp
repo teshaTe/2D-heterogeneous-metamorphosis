@@ -55,9 +55,13 @@ namespace  args
   shader::ColorMode color_mode = shader::ColorMode::RGB;
 
   int frame        = 0;
+#ifdef USE_CONE_F3
+  int n_frames     = 150;
+#else
   int n_frames     = 100;
+#endif
   int move_img2_fr = 0;
-  float scale = 0.0f;
+  float scale      = 0.0f;
 }
 
 void print_args()
@@ -112,7 +116,10 @@ bool parse_args(int argc, char** argv)
       args::n_frames = std::stoi(argv[i + 1]);
 
     else if (!strcmp(cur, "--back"))
+    {
       args::background = argv[i + 1];
+      std::cout << "Your background is: " << args::background << std::endl;
+    }
 
     else if (!strcmp(cur, "--help"))
     {
@@ -326,42 +333,46 @@ int main(int argc, char** argv)
        stb_tricks::StbEnhancements stb;
        stb.get_right_step_xy(&st_x, &st_y, shift_x, shift_y, 70);
 
-       cv::Mat affine_m_st, affine_m;
-       cv::Mat image2     = new_shader.get_image2();
-       cv::Mat image2_sh  = stb.get_affine_transformed_image(image2, &affine_m_st, st_x, st_y);
-
-       cv::imwrite("tmp.png", image2_sh);
-
-       new_shader.update_affine_matrix(affine_m_st);
-       affine_m = new_shader.get_affine_matrix();
-
-       std::vector<float> f22_m;
-       f22_m.resize(f2.size());
-       float *f2_m = f22_m.data();
-       float u_x, u_y;
-       float res = 0.0f;
-
-       for(int y = 0; y < im_h; ++y)
+       if(st_x != 0.0f && st_y != 0.0f)
        {
-           for(int x = 0; x < im_w; ++x)
-           {
-               u_x = static_cast<float>(x) / static_cast<float>(im_h);
-               u_y = static_cast<float>(y) / static_cast<float>(im_w);
-               new_shader.DF.get()->inverse_mapping_result(&res, f2, u_x, u_y, affine_m);
-               f2_m[x+y*im_w] = res;
-           }
+            cv::Mat affine_m_st, affine_m;
+            cv::Mat image2     = new_shader.get_image2();
+            cv::Mat image2_sh  = stb.get_affine_transformed_image(image2, &affine_m_st, st_x, st_y);
+
+#ifdef USE_DEBUG_INFO
+            cv::imwrite("tmp.png", image2_sh);
+#endif
+            new_shader.update_affine_matrix(affine_m_st);
+            affine_m = new_shader.get_affine_matrix();
+
+            std::vector<float> f22_m;
+            f22_m.resize(f2.size());
+            float *f2_m = f22_m.data();
+            float u_x, u_y;
+            float res = 0.0f;
+
+            for(int y = 0; y < im_h; ++y)
+            {
+                for(int x = 0; x < im_w; ++x)
+                {
+                    u_x = static_cast<float>(x) / static_cast<float>(im_h);
+                    u_y = static_cast<float>(y) / static_cast<float>(im_w);
+                    new_shader.DF.get()->inverse_mapping_result(&res, f2, u_x, u_y, affine_m);
+                    f2_m[x+y*im_w] = res;
+                }
+            }
+
+            new_shader.update_image2(image2_sh);
+            new_shader.update_im2_buff();
+            new_shader.update_f2_tr_values(f22_m);
+            new_shader.update_ai_coeffs();
+            f22_m.clear();
+
+            auto end3 = std::chrono::high_resolution_clock::now();
+            auto dur3 = std::chrono::duration_cast<std::chrono::duration<double>>(end3 - start3);
+            std::cout << "spent time(affine_op): " << dur3.count() << " seconds"   << std::endl;
+            affine_time.push_back(dur3.count() + dur2.count());
        }
-
-       new_shader.update_image2(image2_sh);
-       new_shader.update_im2_buff();
-       new_shader.update_f2_tr_values(f22_m);
-       new_shader.update_ai_coeffs();
-       f22_m.clear();
-
-       auto end3 = std::chrono::high_resolution_clock::now();
-       auto dur3 = std::chrono::duration_cast<std::chrono::duration<double>>(end3 - start3);
-       std::cout << "spent time(affine_op): " << dur3.count() << " seconds"   << std::endl;
-       affine_time.push_back(dur3.count() + dur2.count());
 
 #endif //USE_AFFINE_TRANSFORMATIONS
 
