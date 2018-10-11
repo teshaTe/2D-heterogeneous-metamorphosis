@@ -43,9 +43,8 @@ public:
   void inverse_mapping_result(float *res, std::vector<float> SDF, float u_shifted, float v_shifted, cv::Mat affine_m);
 
 private:
-  inline float get_massive_val(float *massive, int x, int y, int width) { return massive[x+y*width]; }
-
-  inline float extrapolate_vals(float val1, float val2, int n1, int n2, int cur_n)  { return val1 + (val2 - val1) * (cur_n - n1)/(n2 - n1); }
+  inline float get_massive_val (float *massive, int x, int y, int width) { return massive[x+y*width]; }
+  inline float extrapolate_vals(float val1, float val2, int n1, int n2, int cur_n) { return val1 + (val2 - val1) * (cur_n - n1)/(n2 - n1); }
 #endif
 
 private:
