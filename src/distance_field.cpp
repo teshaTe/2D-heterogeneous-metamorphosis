@@ -215,11 +215,11 @@ void DistanceField::inverse_mapping_result(float *res, std::vector<float> SDF, f
 
     float x = (inv_affine_m.at<double>(0, 0) * point.x +
                inv_affine_m.at<double>(0, 1) * point.y +
-               inv_affine_m.at<double>(0, 2) * point.z)+1.0f;
+               inv_affine_m.at<double>(0, 2) * point.z)+1.0;
 
     float y = (inv_affine_m.at<double>(1, 0) * point.x +
                inv_affine_m.at<double>(1, 1) * point.y +
-               inv_affine_m.at<double>(1, 2) * point.z)+1.0f;
+               inv_affine_m.at<double>(1, 2) * point.z)+1.0;
 
     float *data = SDF.data();
     float FF1, FF2, aver;
@@ -231,12 +231,12 @@ void DistanceField::inverse_mapping_result(float *res, std::vector<float> SDF, f
     }
 
     //SECTION: outside of the defined picture, right border
-    else if( static_cast<int>(x) >= (im_h-1) && static_cast<int>(y) < (im_h-1) && x >= 0.0f && y >= 0.0f )
+    else if( static_cast<int>(x) >= (im_w-1) && static_cast<int>(y) < (im_h-1) && x >= 0.0f && y >= 0.0f )
     {
         FF1  = get_massive_val(data, im_w-3, static_cast<int>(y), im_w-1);
         FF2  = get_massive_val(data, im_w-2, static_cast<int>(y), im_w-1);
 
-        aver = extrapolate_vals(FF1, FF2, im_w-3, im_w-2, x);
+        aver = extrapolate_vals(FF1, FF2, im_w-3, im_w-2, static_cast<int>(x));
         *res = get_massive_val(data, im_w-2, static_cast<int>(y), im_w-1) + aver;
         if(std::abs(*res) < 2.0f)
           *res *= 2.0f;
@@ -250,7 +250,6 @@ void DistanceField::inverse_mapping_result(float *res, std::vector<float> SDF, f
 
         aver = extrapolate_vals(FF1, FF2, im_h-3, im_h-2, static_cast<int>(y));
         *res = get_massive_val(data, static_cast<int>(x), im_h-2, im_w-1) + aver;
-        //*res = SDF[static_cast<int>(x) + (im_h-2)*(im_h-1)] - std::sqrt( y*y / ( (im_h-1) * (im_h-1) ));
     }
 
     //SECTION: outside of the defined picture, top border
