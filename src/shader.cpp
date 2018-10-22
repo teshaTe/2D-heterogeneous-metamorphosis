@@ -176,7 +176,7 @@ void shader::ColorShader::set_ai_coeffs()
 #elif defined (USE_PYRAMID_F3)
     a3 = std::min(r1_uv, r2_uv)*0.13336f;
 #else
-    a3 = 1.0f;
+    a3 = max_a3;
 #endif
 
     std::vector<float> a0_interval = calc_a0_interval();
@@ -203,7 +203,11 @@ bool shader::ColorShader::check_2circle_crosssection()
 
     float diskr = -4.0f*c1*c2 + c3*c3;
 
-    if(diskr < 0.0f || std::sqrt( (cx2-cx1)*(cx2-cx1) + (cy2-cy1)*(cy2-cy1)) < std::min(r1_uv, r2_uv)/2.0f )
+    if(diskr < 0.0f && std::sqrt( (cx2-cx1)*(cx2-cx1) + (cy2-cy1)*(cy2-cy1)) < std::min(r1_uv, r2_uv)/2.0f )
+        return false;
+    else if (diskr < 1.0f/100000.0f)
+        return false;
+    else if (diskr == 0.0f)
         return false;
     else
         return true;
@@ -452,192 +456,6 @@ std::vector<float> shader::ColorShader::calc_a0_interval()
     return a0_int;
 }
 
-/*std::vector<float> shader::ColorShader::calc_a3_interval(float A, float B, float C)
-{
-    int first_enter = 0;
-    int second_enter = 0;
-
-#ifdef USE_PYRAMID_F3
-
-#elif USE_CONE_F3
-
-#else
-    float f3_min, f3_max;
-
-    for (int i =0; i< 100; i++)
-    {
-       float t = ( 20.0f / 0.36f ) * ( i/100.0f - 0.01f ) * ( i/100.0f - 0.01f ) - 10.0f;
-       if (INTERSECT(t + 10.0f, 10.0f - t) > 0.0f && first_enter < 1 )
-       {
-          f3_min =INTERSECT(t + 10.0f, 10.0f - t);
-          t_min = t;
-          first_enter++;
-       }
-       else if(INTERSECT(t + 10.0f, 10.0f - t) < 0.0f && second_enter < 1)
-       {
-           t_max = ( 20.0f / 0.36f ) * ( (i-2)/100.0f - 0.01f ) * ( (i-2)/100.0f - 0.01f ) - 10.0f;
-           f3_max = INTERSECT(t_max + 10.0f, 10.0f - t_max);
-           second_enter++;
-           break;
-       }
-    }
-    std::vector<float> func3   = { f3_min, f3_max };
-
-    if(func3[0] < 0.0f ) func3[0] = 0.0f;
-
-    float func1_min_a = (x_min-cx1)*(x_max-cx1);
-    float func1_min_b = (y_min-cy1)*(y_max-cy1);
-    float func2_min_a = (x_min-cx2)*(x_max-cx2);
-    float func2_min_b = (y_min-cy2)*(y_max-cy2);
-    if(func1_min_a < 0.0f) func1_min_a = 0.0f;
-    if(func1_min_b < 0.0f) func1_min_b = 0.0f;
-    if(func2_min_a < 0.0f) func2_min_a = 0.0f;
-    if(func2_min_b < 0.0f) func2_min_b = 0.0f;
-
-    std::vector<float> func1 = { std::sqrt(func1_min_a) + std::sqrt(func1_min_b) - r1_uv,
-                                 std::sqrt((x_max-cx1)*(x_max-cx1)) + std::sqrt((y_max-cy1)*(y_max-cy1)) - r1_uv };
-
-    std::vector<float> func2 = { std::sqrt(func2_min_a) + std::sqrt(func2_min_b) - r2_uv,
-                                 std::sqrt((x_max-cx2)*(x_max-cx2)) + std::sqrt((y_max-cy2)*(y_max-cy2)) - r2_uv };
-
-    std::vector<float> sumF1F2    = { func1[0]+func2[0], func1[1]+func2[1] };
-
-    std::vector<float> sum_F11F22 = { func1[0]*func1[1] + func2[0]*func2[1], func1[1]*func1[1] + func2[1]*func2[1] };
-    if (sum_F11F22[0] < 0.0f) sum_F11F22[0] = 0.0f;
-
-    float dist = std::sqrt((cx2-cx1)*(cx2-cx1) + (cy2-cy1)*(cy2-cy1) );
-
-    std::vector<float> chisl = { a1*a1*dist*f3_min*f3_max, a1*a1*dist*f3_max*f3_max };
-
-    std::vector<float> znam = { sum_F11F22[0]*r1_uv + sum_F11F22[0]*r2_uv - sum_F11F22[1]*dist ,
-                                sum_F11F22[1]*r1_uv + sum_F11F22[1]*r2_uv - sum_F11F22[0]*dist };
-
-    std::vector<float> a3_int_2 = { min4(chisl[0] / znam[0], chisl[1] / znam[0], chisl[0] / znam[1], chisl[1] / znam[1]),
-                                  max4(chisl[0] / znam[0], chisl[1] / znam[0], chisl[0] / znam[1], chisl[1] / znam[1])};
-
-    if(a3_int_2[0] < 0.0f) a3_int_2[0] = 0.0f;
-
-    std::vector<float> a3_int = {std::sqrt(a3_int_2[0]), std::sqrt(a3_int_2[1])};
-
-   /* std::vector<float> sumF1F2SqrF1F2 = { sumF1F2[0] + std::sqrt(sum_F11F22[0]), sumF1F2[1] + std::sqrt(sum_F11F22[1]) };
-    *
-    *  std::vector<float> f3_2  =  { func3[0]*func3[1], func3[1]*func3[1] };
-    if(f3_2[0] < 0.0f) f3_2[0] = 0.0f;
-
-
-    std::vector<float> f1f3_2 = { min4(func1[0]*f3_2[0], func1[0]*f3_2[1], func1[1]*f3_2[0], func1[1]*f3_2[1]),
-                                  max4(func1[0]*f3_2[0], func1[0]*f3_2[1], func1[1]*f3_2[0], func1[1]*f3_2[1]) };
-    std::vector<float> f2f3_2 = { min4(func2[0]*f3_2[0], func2[0]*f3_2[1], func2[1]*f3_2[0], func2[1]*f3_2[1]),
-                                  max4(func2[0]*f3_2[0], func2[0]*f3_2[1], func2[1]*f3_2[0], func2[1]*f3_2[1]) };
-
-    std::vector<float> xf3_2  = { min4(x_min*f3_2[0], x_min*f3_2[1], x_max*f3_2[0], x_max*f3_2[1]),
-                                  max4(x_min*f3_2[0], x_min*f3_2[1], x_max*f3_2[0], x_max*f3_2[1]) };
-    std::vector<float> yf3_2  = { min4(y_min*f3_2[0], y_min*f3_2[1], y_max*f3_2[0], y_max*f3_2[1]),
-                                  max4(y_min*f3_2[0], y_min*f3_2[1], y_max*f3_2[0], y_max*f3_2[1]) };
-
-    std::vector<float> SqrSumF12F22F3_2 = { min4(std::sqrt(sum_F11F22[0])*f3_2[0], std::sqrt(sum_F11F22[0])*f3_2[1],
-                                                 std::sqrt(sum_F11F22[1])*f3_2[0], std::sqrt(sum_F11F22[1])*f3_2[1]),
-                                            max4(std::sqrt(sum_F11F22[0])*f3_2[0], std::sqrt(sum_F11F22[0])*f3_2[1],
-                                                 std::sqrt(sum_F11F22[1])*f3_2[0], std::sqrt(sum_F11F22[1])*f3_2[1]) };
-
-    std::vector<float> SumF12F22F3_2    = { min4((1.0f/(a1*a1))*sum_F11F22[0]*f3_2[0], (1.0f/(a1*a1))*sum_F11F22[1]*f3_2[0],
-                                                 (1.0f/(a1*a1))*sum_F11F22[0]*f3_2[1], (1.0f/(a1*a1))*sum_F11F22[1]*f3_2[1]),
-                                            max4((1.0f/(a1*a1))*sum_F11F22[0]*f3_2[0], (1.0f/(a1*a1))*sum_F11F22[1]*f3_2[0],
-                                                 (1.0f/(a1*a1))*sum_F11F22[0]*f3_2[1], (1.0f/(a1*a1))*sum_F11F22[1]*f3_2[1]) };
-
-    std::vector<float> f1SumF11F22      = { min4((1.0f/(a1*a1))*sum_F11F22[0]*func1[0], (1.0f/(a1*a1))*sum_F11F22[1]*func1[0],
-                                                 (1.0f/(a1*a1))*sum_F11F22[0]*func1[1], (1.0f/(a1*a1))*sum_F11F22[1]*func1[1]),
-                                            max4((1.0f/(a1*a1))*sum_F11F22[0]*func1[0], (1.0f/(a1*a1))*sum_F11F22[1]*func1[0],
-                                                 (1.0f/(a1*a1))*sum_F11F22[0]*func1[1], (1.0f/(a1*a1))*sum_F11F22[1]*func1[1]) };
-
-    std::vector<float> f2SumF11F22      = { min4((1.0f/(a1*a1))*sum_F11F22[0]*func2[0], (1.0f/(a1*a1))*sum_F11F22[1]*func2[0],
-                                                 (1.0f/(a1*a1))*sum_F11F22[0]*func2[1], (1.0f/(a1*a1))*sum_F11F22[1]*func2[1]),
-                                            max4((1.0f/(a1*a1))*sum_F11F22[0]*func2[0], (1.0f/(a1*a1))*sum_F11F22[1]*func2[0],
-                                                 (1.0f/(a1*a1))*sum_F11F22[0]*func2[1], (1.0f/(a1*a1))*sum_F11F22[1]*func2[1]) };
-
-    std::vector<float> xSumF11F22       = { min4((1.0f/(a1*a1))*sum_F11F22[0]*x_min, (1.0f/(a1*a1))*sum_F11F22[1]*x_min,
-                                                 (1.0f/(a1*a1))*sum_F11F22[0]*x_max, (1.0f/(a1*a1))*sum_F11F22[1]*x_max),
-                                            max4((1.0f/(a1*a1))*sum_F11F22[0]*x_min, (1.0f/(a1*a1))*sum_F11F22[1]*x_min,
-                                                 (1.0f/(a1*a1))*sum_F11F22[0]*x_max, (1.0f/(a1*a1))*sum_F11F22[1]*x_max) };
-
-    std::vector<float> ySumF11F22       = { min4((1.0f/(a1*a1))*sum_F11F22[0]*y_min, (1.0f/(a1*a1))*sum_F11F22[1]*y_min,
-                                                 (1.0f/(a1*a1))*sum_F11F22[0]*y_max, (1.0f/(a1*a1))*sum_F11F22[1]*y_max),
-                                            max4((1.0f/(a1*a1))*sum_F11F22[0]*y_min, (1.0f/(a1*a1))*sum_F11F22[1]*y_min,
-                                                 (1.0f/(a1*a1))*sum_F11F22[0]*y_max, (1.0f/(a1*a1))*sum_F11F22[1]*y_max) };
-
-    std::vector<float> sumF12SqrSumF11F22  = { min4((1.0f/(a1*a1))*sum_F11F22[0]*std::sqrt(sum_F11F22[0]), (1.0f/(a1*a1))*sum_F11F22[1]*std::sqrt(sum_F11F22[0]),
-                                                    (1.0f/(a1*a1))*sum_F11F22[0]*std::sqrt(sum_F11F22[1]), (1.0f/(a1*a1))*sum_F11F22[1]*std::sqrt(sum_F11F22[1])),
-                                               max4((1.0f/(a1*a1))*sum_F11F22[0]*std::sqrt(sum_F11F22[0]), (1.0f/(a1*a1))*sum_F11F22[1]*std::sqrt(sum_F11F22[0]),
-                                                    (1.0f/(a1*a1))*sum_F11F22[0]*std::sqrt(sum_F11F22[1]), (1.0f/(a1*a1))*sum_F11F22[1]*std::sqrt(sum_F11F22[1])) };
-
-    //intermediate calculations for chislitel
-    std::vector<float> mem2 = { 9.0f*a0*a0*( (A*x_min + B*y_min) - sumF1F2SqrF1F2[1] + C ),
-                                9.0f*a0*a0*( (A*x_max + B*y_max) - sumF1F2SqrF1F2[0] + C ) };
-
-    //sqrt( 108*(...)^3 + ...)
-    std::vector<float> mem3   = { a0*(sumF1F2SqrF1F2[0] - (A*x_max + B*y_max) - C),
-                                  a0*(sumF1F2SqrF1F2[1] - (A*x_min + B*y_min) - C) };
-
-    float mem3_2 = std::pow( std::max(-mem3[0], mem3[1]), 2.0f);
-    std::vector<float> mem3_3 = { 108.0f*mem3_2*mem3[0] , 108.0f*mem3_2*mem3[1] };
-
-    //sqrt(.. + (...)^2 )
-    std::vector<float> mem4   = { 54.0f*a0*a0*((A*x_min + B*y_min) - sumF1F2SqrF1F2[1] + C),
-                                  54.0f*a0*a0*((A*x_max + B*y_max) - sumF1F2SqrF1F2[0] + C) };
-
-    std::vector<float> mem4_2 = { mem4[0]*mem4[1], mem4[1]*mem4[1] };
-    if(mem4_2[0] < 0.0f) mem4_2[0] = 0.0f;
-
-    //sqrt( (...)^2 - (...)^3) as 108 is with minus
-    float sqr_min_diff = mem4_2[0] - mem3_3[1];
-    if(sqr_min_diff < 0.0f) sqr_min_diff = 0.0f;
-
-    std::vector<float> mem5 = { (1.0f/6.0f) * std::sqrt( sqr_min_diff ), (1.0f/6.0f) * std::sqrt( mem4_2[1] - mem3_3[0] ) };
-    // sqrt caclulation finished.
-
-    // summing ( ... + sqrt(...) )^1/3 - first square root
-    std::vector<float> mem6a = { std::cbrt(  mem2[0] + mem5[0] ), std::cbrt(mem2[1] + mem5[1]) };
-
-    // summing ( ... + sqrt(...) )^2/3 - second square root
-    std::vector<float> mem6b = { std::cbrt( (mem2[0] + mem5[0])*(mem2[1] + mem5[1])),
-                                 std::cbrt( (mem2[1] + mem5[1])*(mem2[1] + mem5[1]))};
-    if ( mem6b[0] < 0.0f ) mem6b[0] = 0.0f;
-
-    //intermediate calculations for znamenatel
-    std::vector<float> mem7 = { std::cbrt(9.0f)*a0*( f1SumF11F22[0] + f2SumF11F22[0] + sumF12SqrSumF11F22[0] -
-                                C*(1.0f/(a1*a1))*sum_F11F22[1] - ( A*xSumF11F22[1] + B*ySumF11F22[1] )),
-                                std::cbrt(9.0f)*a0*( f1SumF11F22[1] + f2SumF11F22[1] + sumF12SqrSumF11F22[1] -
-                                C*(1.0f/(a1*a1))*sum_F11F22[0] - ( A*xSumF11F22[0] + B*ySumF11F22[0] )) };
-
-    //final members of the final estimated function
-    std::vector<float> mem1_fin  = { std::cbrt(9.0f)*a0*( C*f3_2[0] - f1f3_2[1] - f2f3_2[1] -
-                                     SqrSumF12F22F3_2[1] + A*xf3_2[0] + B*yf3_2[0]),
-                                     std::cbrt(9.0f)*a0*( C*f3_2[1] - f1f3_2[0] - f2f3_2[0] -
-                                     SqrSumF12F22F3_2[0] + A*xf3_2[1] + B*yf3_2[1]) };
-
-    std::vector<float> mem6a_fin = { 3.0f*a0*min4(f3_2[0]*mem6a[0], f3_2[0]*mem6a[1], f3_2[1]*mem6a[0], f3_2[1]*mem6a[1] ),
-                                     3.0f*a0*max4(f3_2[0]*mem6a[0], f3_2[0]*mem6a[1], f3_2[1]*mem6a[0], f3_2[1]*mem6a[1]) };
-
-    std::vector<float> mem6b_fin = { std::cbrt(3.0f)*min4(f3_2[0]*mem6b[0], f3_2[0]*mem6b[1], f3_2[1]*mem6b[0], f3_2[1]*mem6b[1] ),
-                                     std::cbrt(3.0f)*max4(f3_2[0]*mem6b[0], f3_2[0]*mem6b[1], f3_2[1]*mem6b[0], f3_2[1]*mem6b[1]) };
-
-    //znamenatel
-    std::vector<float> mem7_fin = { std::cbrt(3.0f)*min4((1.0f/(a1*a1))*sum_F11F22[0]*mem6b[0], (1.0f/(a1*a1))*sum_F11F22[0]*mem6b[1],
-                                                         (1.0f/(a1*a1))*sum_F11F22[1]*mem6b[0], (1.0f/(a1*a1))*sum_F11F22[1]*mem6b[1] ),
-                                    std::cbrt(3.0f)*max4((1.0f/(a1*a1))*sum_F11F22[0]*mem6b[0], (1.0f/(a1*a1))*sum_F11F22[0]*mem6b[1],
-                                                         (1.0f/(a1*a1))*sum_F11F22[1]*mem6b[0], (1.0f/(a1*a1))*sum_F11F22[1]*mem6b[1]) };
-
-    std::vector<float> chisl_fin = { mem1_fin[0] + mem6a_fin[0] - mem6b_fin[1], mem1_fin[1] + mem6a_fin[1] - mem6b_fin[0] };
-    std::vector<float> znam_fin  = { mem7[0] + mem7_fin[0], mem7[1] + mem7_fin[1] };
-
-    std::vector<float> a3_int = { min4(chisl_fin[0] / znam_fin[0], chisl_fin[1] / znam_fin[0], chisl_fin[0] / znam_fin[1], chisl_fin[1] / znam_fin[1]),
-                                  max4(chisl_fin[0] / znam_fin[0], chisl_fin[1] / znam_fin[0], chisl_fin[0] / znam_fin[1], chisl_fin[1] / znam_fin[1])};
-
-    return a3_int;
-#endif
-}
-
-
 /*
  * obtain_color() - function, which obtaining the color of the pixel from the loaded picture;
  */
@@ -675,6 +493,7 @@ void shader::ColorShader::color_image(ngl::Vec4 *color, ngl::Vec2 coord, int fra
                              coord.m_y / static_cast<float>(resolution_y));
 
     float t = static_cast<float>(frame) / static_cast<float>(length_param);
+
     if(t < 0.01f || t == 0.01f)
     {
        time = -10.0f;
@@ -1112,90 +931,6 @@ ngl::Vec4 shader::ColorShader::final_color(ngl::Vec2 uv, float f1, float f2, flo
 
   return surf_col;
 }
-
-/*
- * function1() - controlls the shape of the 1 object
-
-float shader::ColorShader::function1(float uv_x, float uv_y)
-{
-   float result = 0.0f;
-
-#ifdef USE_DISTANCE_FIELD
-   result = F1[static_cast<int>(uv_x*resolution_x) + static_cast<int>(uv_y*resolution_y*resolution_x)];
-#endif // defined(USE_DISTANCE_FIELD)
-
-#ifdef USE_CIRCLE_CIRCLE_CROSS
-  uv_y = 1.0f - uv_y;
-  ngl::Vec2 pos = ngl::Vec2(uv_x * 10.0f - 5.0f, uv_y * 10.0f - 3.0f);
-
-  float disk1 = 1.0f - (pos.m_x - 1.0f) * (pos.m_x - 1.0f) - pos.m_y * pos.m_y;
-  float disk2 = 1.0f - (pos.m_x + 1.5f) * (pos.m_x + 1.5f) - pos.m_y * pos.m_y;
-  float ddisk = UNION(disk1, disk2);
-  result = ddisk;
-#endif //TWO_CIRCLES_CROSS
-
-#ifdef USE_CIRCLE_RING_CROSS
-  uv_y = 1.0f - uv_y;
-  ngl::Vec2 pos = ngl::Vec2(uv_x * 10.0f - 5.0f, uv_y * 10.0f - 3.0f);
-
-  float disk1    = 1.0f - (pos.m_x - 1.0f) * (pos.m_x - 1.0f) - pos.m_y * pos.m_y;
-
-  float disk_out = 1.0f - (pos.m_x + 1.5f) * (pos.m_x + 1.5f) - pos.m_y * pos.m_y;
-  float disk_in  = 0.5f - (pos.m_x + 1.5f) * (pos.m_x + 1.5f) - pos.m_y * pos.m_y;
-  float ring     = SUBTRACT(disk_out, disk_in);
-
-  float ddisk = UNION(disk1, ring);
-  result = ddisk;
-#endif // CIRCLE_RING_CROSS
-
-#ifdef USE_CIRCLE_CIRCLE
-  uv.m_y = 1.0f - uv_y;
-  ngl::Vec2 pos = ngl::Vec2(uv_x * 10.0f - 5.0f, uv_y * 10.0f - 3.0f);
-
-  result = 3.0f - pos.m_x * pos.m_x - pos.m_y * pos.m_y;
-#endif //CIRCLE_CIRCLE
-
-  return result;
-}
-
- * function2() - controlls the shape of the second object
-
-float shader::ColorShader::function2(float uv_x, float uv_y)
-{
-    float result = 0.0f;
-
-#ifdef USE_DISTANCE_FIELD
-#ifndef USE_AFFINE_TRANSFORMATIONS
-    result = F2[static_cast<int>(uv_x*resolution_x) + static_cast<int>(uv_y*resolution_y*resolution_x)];
-#else
-    result = F2_m[static_cast<int>(uv_x*resolution_x) + static_cast<int>(uv_y*resolution_y*resolution_x)];
-#endif
-#endif// defined(USE_DISTANCE_FIELD) && not defined(USE_AFFINE_TRANSFORMATIONS)
-
-#if defined (USE_CIRCLE_CIRCLE_CROSS) || defined (USE_CIRCLE_RING_CROSS)
-    uv_y = 1.0f - uv_y;
-    ngl::Vec2 pos = ngl::Vec2(uv_x * 10.0f - 5.0f, uv_y * 10.0f - 3.0f);
-
-    float bl1 = INTERSECT(INTERSECT(INTERSECT((pos.m_x + 1.0f),  (0.0f - pos.m_x)),
-                                              (pos.m_y - 2.0f)), (5.0f - pos.m_y));
-    float bl2 = INTERSECT(INTERSECT(INTERSECT((pos.m_y - 3.0f),  (4.0f - pos.m_y)),
-                                              (pos.m_x + 2.0f)), (1.0f - pos.m_x));
-    float cross = UNION(bl1, bl2);
-    result = cross;
-
-#endif //defined (TWO_CIRCLES_CROSS) || defined (CIRCLE_RING_CROSS)
-
-#ifdef USE_CIRCLE_CIRCLE
-  uv.m_y = 1.0f - uv_y;
-  ngl::Vec2 pos = ngl::Vec2(uv_x * 10.0f - 5.0f, uv_y * 10.0f - 6.0f);
-
-  result = 0.6f - pos.m_x * pos.m_x - pos.m_y * pos.m_y;
-
-#endif //CIRCLE_CIRCLE
-
-  return result;
-}
-*/
 
 /*
  * function3() - controlls the bounding box insied of which space-time blending took place
