@@ -9,14 +9,14 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_FLAGS " -pthread ${CMAKE_CXX_FLAGS}")
 
 option(USE_DEBUG_INFO               OFF)
-option(USE_SMOOTHED_CYLINDERS       OFF)
-option(USE_DISTANCE_FIELDS          OFF)
+option(USE_SMOOTHED_CYLINDERS       ON)
+option(USE_DISTANCE_FIELDS          ON)
 option(USE_AFFINE_TRANSFORMATIONS   OFF)
 option(USE_CONE_F3                  OFF)
 option(USE_PYRAMID_F3               OFF)
 option(USE_TRANSPARENT_BACKBGROUND  OFF)
 option(USE_OPENMP                   OFF)
-#option(USE_OPENMP_WITH_CUDA_CLANG   OFF)
+option(USE_CROSS_DISSOLVE           OFF)
 
 if(USE_DEBUG_INFO)
     add_definitions(-DUSE_DEBUG_INFO)
@@ -42,24 +42,8 @@ if(USE_PYRAMID_F3)
   add_definitions(-DUSE_PYRAMID_F3)
 endif()
 
-if(USE_EGG_SHAPE_F3)
-  add_definitions(-DUSE_EGG_SHAPE_F3)
-endif()
-
 if(USE_TRANSPARENT_BACKBGROUND)
   add_definitions(-DUSE_TRANSPARENT_BACKBGROUND)
-endif()
-
-if(USE_CIRCLE_CIRCLE->CROSS)
-  add_definitions(-DUSE_CIRCLE_CIRCLE_CROSS)
-endif()
-
-if(USE_CIRCLE_RING->CROSS)
-  add_definitions(-DUSE_CIRCLE_RING_CROSS)
-endif()
-
-if(USE_CIRCLE1->CIRCLE2)
-  add_definitions(-DUSE_CIRCLE_CIRCLE)
 endif()
 
 if(USE_OPENMP)
@@ -73,14 +57,12 @@ if(USE_OPENMP)
     else()
         set(CMAKE_CXX_FLAGS "-fopenmp ${CMAKE_CXX_FLAGS}")
     endif()
+endif(USE_OPENMP)
 
-    if(USE_OPENMP_WITH_CUDA_CLANG)
-      add_definitions(-DUSE_OPENMP_WITH_CUDA_CLANG)
-      find_package(CUDA)
-      set(CMAKE_CXX_FLAGS "-openmp-targets=nvptx64-nvidia-cuda --cuda-path=${CUDA_TOOLKIT_ROOT_DIR} ${CMAKE_CXX_FLAGS}")
-    endif()
-
+if(USE_CROSS_DISSOLVE)
+    add_definitions(-DUSE_CROSS_DISSOLVE)
 endif()
+
 
 include_directories("${CMAKE_CURRENT_SOURCE_DIR}/NGL/include")
 link_directories("${CMAKE_CURRENT_SOURCE_DIR}/NGL/lib")
@@ -109,8 +91,4 @@ target_link_libraries(2d_blend NGL boost_system opencv_imgcodecs opencv_highgui
 
 if(USE_OPENMP)
     target_link_libraries(2d_blend gomp omp omptarget omptarget-nvptx omptarget.rtl.cuda)
-endif()
-
-if(USE_OPENMP_WITH_CUDA_CLANG)
-    target_link_libraries(2d_blend ${CUDA_LIBRARIES})
 endif()
