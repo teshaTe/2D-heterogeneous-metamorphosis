@@ -266,6 +266,15 @@ int main(int argc, char** argv)
     size_t d_step = dst.step;
     int d_ch = dst.channels();
 
+#ifdef USE_CROSS_DISSOLVE
+    int ch1 = img1.channels();
+    int ch2 = img2.channels();
+    size_t step1 = img1.step;
+    size_t step2 = img2.step;
+    unsigned char *im1_buf = img1.data;
+    unsigned char *im2_buf = img2.data;
+#endif
+
     while(frame_num < args::n_frames)
     {
        auto start2 = std::chrono::high_resolution_clock::now();
@@ -275,11 +284,20 @@ int main(int argc, char** argv)
        {
            for(int x = 0; x < im_w; x++ )
            {
+#ifndef USE_CROSS_DISSOLVE
                new_shader.color_image( &col, ngl::Vec2(x,y), frame_num );
                dst_buff[x*d_ch  +y*d_step] = col.m_b * 255;
                dst_buff[x*d_ch+1+y*d_step] = col.m_g * 255;
                dst_buff[x*d_ch+2+y*d_step] = col.m_r * 255;
                dst_buff[x*d_ch+3+y*d_step] = col.m_a * 255;
+#else
+               float time = static_cast<float>(frame_num) / static_cast<float>(args::n_frames);
+
+               dst_buff[x*d_ch  +y*d_step] = (1.0f-time)*im1_buf[x*ch1   + y*step1] + time * im2_buf[x*ch2   + y*step2];
+               dst_buff[x*d_ch+1+y*d_step] = (1.0f-time)*im1_buf[x*ch1+1 + y*step1] + time * im2_buf[x*ch2+1 + y*step2];
+               dst_buff[x*d_ch+2+y*d_step] = (1.0f-time)*im1_buf[x*ch1+2 + y*step1] + time * im2_buf[x*ch2+2 + y*step2];
+               dst_buff[x*d_ch+3+y*d_step] = (1.0f-time)*im1_buf[x*ch1+3 + y*step1] + time * im2_buf[x*ch2+3 + y*step2];
+#endif
            }
        }
 
