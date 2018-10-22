@@ -72,14 +72,13 @@ private:
   void clamp_color(ngl::Vec4 *col);
 
   float function3(ngl::Vec2 uv, float time);
-  //float function1(float uv_x, float uv_y);
-  //float function2(float uv_x, float uv_y);
+
+  ngl::Vec4 cross_dissolve(ngl::Vec4 col1, ngl::Vec4 col2, float time);
 
   //functions for ai coeffs interval estimation
 private:
   float calc_a1_coeff();
   std::vector<float> calc_a0_interval();
-  //std::vector<float> calc_a3_interval(float A, float B, float C);
   void set_ai_coeffs();
   bool check_2circle_crosssection();
 
@@ -135,8 +134,6 @@ private:
 
   cv::Rect rec1, rec2;
 
-  double angle = 0.0;
-
   //private paramters for a0 and a3 interval estimation
 private:
   float x_min, x_max;
@@ -154,7 +151,7 @@ private:
 
   //parameters for smoothing cylinders
 private:
-  float max_a3 = 10.0f;
+  float max_a3 = 1.0f;
 
   //1st cylinder
   float f3_pyr_1  = -0.3f;
