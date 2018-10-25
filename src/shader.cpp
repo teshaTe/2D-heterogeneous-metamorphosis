@@ -33,8 +33,6 @@ shader::ColorShader::ColorShader(int length, cv::Mat img1, cv::Mat img2,
     DF = nullptr;
     set_ai_coeffs();
 
-#ifdef USE_DISTANCE_FIELD
-
     auto start = std::chrono::high_resolution_clock::now();
 
     DF = std::make_shared<distance_field::DistanceField>(image1, image2);
@@ -98,9 +96,6 @@ shader::ColorShader::ColorShader(int length, cv::Mat img1, cv::Mat img2,
     auto dur = std::chrono::duration_cast<std::chrono::duration<double>>(end - start);
     std::cout << "Preproc. time (around distance_fields): " << dur.count() << " seconds" << std::endl;
 #endif
-
-#endif // USE_DISTANCE_FIELD
-
 #if defined(USE_AFFINE_TRANSFORMATIONS) || defined(USE_CONE_F3) || defined(USE_PYRAMID_F3) || defined(USE_EGG_SHAPE_F3)
 
 #if defined(USE_CONE_F3) || defined(USE_EGG_SHAPE_F3)
@@ -168,8 +163,10 @@ void shader::ColorShader::set_ai_coeffs()
     r1_uv = r1 / resolution_x;
     r2_uv = r2 / resolution_x;
 
+#ifndef USE_MANUAL_ai
     a1 = calc_a1_coeff();
     a2 = a1;
+#endif
 
 #ifdef USE_CONE_F3
     a3 = std::min(r1_uv, r2_uv)*0.03126f;
@@ -179,6 +176,7 @@ void shader::ColorShader::set_ai_coeffs()
     a3 = max_a3;
 #endif
 
+#ifndef USE_MANUAL_ai
     std::vector<float> a0_interval = calc_a0_interval();
     a0 = a0_interval[1];
 
@@ -188,6 +186,8 @@ void shader::ColorShader::set_ai_coeffs()
 
     //std::cout << "Enter a_0 suitable for you: ";
     //std::cin >> a0; std::cout << std::endl;
+#endif
+
 }
 
 bool shader::ColorShader::check_2circle_crosssection()
