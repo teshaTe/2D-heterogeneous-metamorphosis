@@ -6,6 +6,6 @@ To build the project the following libraries should be intalled:
 
 OpenCV: https://opencv.org/
 
-NGL:    https://nccastaff.bournemouth.ac.uk/jmacey/GraphicsLib/
+GLM:    https://glm.g-truc.net/0.9.9/index.html
 
 OpenMP [optional]: https://www.openmp.org/ 
