@@ -16,6 +16,8 @@ OpenCV: https://opencv.org/
 
 GLM: https://glm.g-truc.net/0.9.9/index.html
 
+Geometric tools [for convenience prebuild version can be found in this repository]: https://www.geometrictools.com/
+
 OpenMP [optional fot better performance]: https://www.openmp.org/
 
 The presented code is free to use. 
