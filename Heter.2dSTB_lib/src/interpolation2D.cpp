@@ -14,51 +14,54 @@ std::vector<float> inter2D::geoToolsResample2D(std::vector<float> *field, InterT
                                                glm::ivec2 inRes, glm::ivec2 outRes,
                                                glm::vec2 step, bool precise)
 {
+    std::vector<float> result;
+    result.resize(field->size());
     glm::vec2 stP(0, 0);
+
     if(type == InterType::GEO_AKIMA)
     {
-        std::vector<float> result;
+
         gte::IntpAkimaUniform2<float> akimaSp(inRes.x, inRes.y, stP.x, step.x,
-                                              stP.y, step.y, &field->at(0));
+                                                stP.y, step.y, &field->at(0));
         for(int y = stP.y; y < outRes.y; y++)
             for(int x = stP.x; x < outRes.x; x++)
-                result.push_back(akimaSp(x, y));
+                result[x+y*outRes.x] = akimaSp(x, y);
         return result;
     }
     else if(type == InterType::GEO_BICUBIC)
     {
-        std::vector<float> result;
         gte::IntpBicubic2<float> bicubicSp(inRes.x, inRes.y, stP.x, step.x,
                                            stP.y, step.y, &field->at(0), precise);
         for(int y = stP.y; y < outRes.y; y++)
             for(int x = stP.x; x < outRes.x; x++)
-                result.push_back(bicubicSp(x, y));
+                result[x+y*outRes.x] = bicubicSp(x, y);
         return result;
     }
     else if(type == InterType::GEO_THINPLATE)
     {
-        std::vector<float> result, vecX, vecY;
+        std::vector<float> vecX, vecY;
+        vecX.resize(inRes.x); vecY.resize(inRes.y);
+
         for(int i = 0; i < inRes.x; i++)
         {
-            vecX.push_back(i);
-            vecY.push_back(i);
+            vecX[i] = i;
+            vecY[i] = i;
         }
 
         gte::IntpThinPlateSpline2<float> thinPlateSp(field->size(), &vecX[0], &vecY[0], &field->at(0), 0.0, false);
 
         for(int y = stP.y; y < outRes.y; y++)
             for(int x = stP.x; x < outRes.x; x++)
-                result.push_back(thinPlateSp(x, y));
+                result[x+y*outRes.x] = thinPlateSp(x, y);
         return result;
     }
     else if(type == InterType::GEO_BILINEAR)
     {
-        std::vector<float> result;
         gte::IntpBilinear2<float> bilinearSp(inRes.x, inRes.y, stP.x, step.x,
                                              stP.y, step.y, &field->at(0));
         for(int y = stP.y; y < outRes.y; y++)
             for(int x = stP.x; x < outRes.x; x++)
-                result.push_back(bilinearSp(x, y));
+                result[x+y*outRes.x] = bilinearSp(x, y);
         return result;
     }
     else

@@ -106,6 +106,7 @@ void heter2dSTB::computeMetamorphosis(BoundingSolid f3, bool useAffineTr, bool a
             timer0.Start();
             setAutoSTBcoefficients();
             timer0.End("Precompute a_i: ");
+            std::cout << "a0 = " << a0 <<"; a1 = " << a1 << "; a2 = " << a2 << "a3 = " << a3 <<std::endl;
         }
         else
         {
@@ -179,7 +180,7 @@ void heter2dSTB::computeMetamorphosis(BoundingSolid f3, bool useAffineTr, bool a
         if(!background.empty())
             useImageBackground(&dst, dst);
 
-//[OPtional]: setting up output path if specified ans save current frame;
+//[Optional]: setting up output path if specified ans save current frame;
         std::string fullPath;
         if(!outputPath.empty())
             fullPath = outputPath + std::to_string(curFrame) + ".png";
@@ -257,7 +258,7 @@ void heter2dSTB::useImageBackground(cv::Mat *dst, const cv::Mat &curImg)
 {
     if(background.empty())
     {
-        std::cerr << "ERROR: failed to load background image [--back]! " << std::endl;
+        throw("ERROR: failed to load background image [--back]! ");
         return;
     }
 
@@ -700,12 +701,22 @@ float heter2dSTB::smoothHalfCylinder2(float functionVal, float time)
 {
     //This algorithm is described in subsection 5.1, p. 13-14
     b1_2 = 1.0f; b2_2 = 1.0f; b3_2 = 1.0f;
-    if(bSolid == BoundingSolid::halfPlanes)
-        b0_2 = -0.5f;
-    else if(bSolid == BoundingSolid::truncCone)
-        b0_2 = -0.2f;  //-0.5f
-    else if(bSolid == BoundingSolid::truncPyramid)
-        b0_2 = -0.5f;
+
+    switch (bSolid)
+    {
+        case BoundingSolid::halfPlanes:
+            b0_2 = -0.5f;
+            break;
+        case BoundingSolid::truncCone:
+            b0_2 = -0.2f;  //-0.5f
+            break;
+        case BoundingSolid::truncPyramid:
+            b0_2 = -0.5f;
+            break;
+        default:
+            throw("ERROR: unknown bounding solid");
+            break;
+    }
 
     float f1 = functionVal;
     float f2 = time - 1.0f;
@@ -774,8 +785,8 @@ float heter2dSTB::obtainF3Values(glm::vec2 uv, float time)
         }
         default:
         {
-            std::cerr << "ERROR: unspecified or unknown bounding solid!" << std::endl;
-            exit(-1);
+            throw("ERROR: unspecified or unknown bounding solid!");
+            break;
         }
     }
     return f3;

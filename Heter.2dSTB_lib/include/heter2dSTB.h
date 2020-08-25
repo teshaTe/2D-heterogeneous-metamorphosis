@@ -48,7 +48,7 @@ class heter2dSTB
 public:
     heter2dSTB(const cv::Mat &inImg, const cv::Mat &targImg, ColorMode colorMode,
                                 DrawMode drawMode, int totalFrames, float scale);
-    ~heter2dSTB() { }
+    ~heter2dSTB() = default;
 
     void computeMetamorphosis(BoundingSolid f3, bool useAffineTr, bool autoMode = true);
     void computeCrossDissolve();
@@ -63,6 +63,8 @@ private:
 
     void setAutoSTBcoefficients();
     void calcA1A2coefficients();
+    void calcA1A2coefficients_test();
+
     void calcA0coefficient();
     void caclA3Coefficient();
     bool check2CircleCrosssection();

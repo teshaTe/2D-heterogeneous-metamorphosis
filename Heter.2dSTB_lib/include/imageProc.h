@@ -17,7 +17,7 @@ class imageProc
 public:
     imageProc(const cv::Mat &img1, const cv::Mat &img2);
     imageProc() { thresh = 100; maxThresh = 255; }
-    ~imageProc() {}
+    ~imageProc() = default;
 
     //Functions for obtaining circumscribed circles/rectangles around input 2d objects
     void getMaxCircumscribedCircles(float *r1, float *r2, glm::vec2 *cen1, glm::vec2 *cen2);

@@ -23,7 +23,7 @@ class SEDTtransform
 {
 public:
     SEDTtransform(int res_x, int res_y);
-    ~SEDTtransform() { }
+    ~SEDTtransform() = default;
 
     void computeDistanceTransform(const cv::Mat &img, bool smooth);
 

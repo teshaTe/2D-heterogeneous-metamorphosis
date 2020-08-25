@@ -141,11 +141,11 @@ void imageProc::createCircumCircle(int, void *)
 {
     std::vector<cv::Vec4i> hierarchy1, hierarchy2;
 
-    /// Detect edges using Threshold
+    // Detect edges using Threshold
     cv::threshold(grayImg1, threshOutput1, thresh, 255, cv::THRESH_BINARY);
     cv::threshold(grayImg2, threshOutput2, thresh, 255, cv::THRESH_BINARY);
 
-    /// Find contours
+    // Find contours
 
     std::vector<std::vector<cv::Point> > contours1, contours2;
     cv::findContours(threshOutput1, contours1, hierarchy1,
@@ -153,15 +153,15 @@ void imageProc::createCircumCircle(int, void *)
     cv::findContours(threshOutput2, contours2, hierarchy2,
                       cv::RETR_TREE, cv::CHAIN_APPROX_SIMPLE, cv::Point2f(0, 0));
 
-    /// Approximate contours to polygons + get bounding rects and circles
-    /// First Picture
+    // Approximate contours to polygons + get bounding rects and circles
+    // First Picture
 
     std::vector<std::vector<cv::Point> > contoursPoly1, contoursPoly2;
     contoursPoly1.resize(contours1.size());
     center1.resize(contours1.size());
     radius1.resize(contours1.size());
 
-    ///Second Picture
+    // Second Picture
     contoursPoly2.resize(contours2.size());
     center2.resize(contours2.size());
     radius2.resize(contours2.size());
@@ -210,24 +210,24 @@ void imageProc::createCircumRectangle(int, void *)
 {
     std::vector<cv::Vec4i> hierarchy1, hierarchy2;
 
-    /// Detect edges using Threshold
+    // Detect edges using Threshold
     cv::threshold(grayImg1, threshOutput1, thresh, 255, cv::THRESH_BINARY);
     cv::threshold(grayImg2, threshOutput2, thresh, 255, cv::THRESH_BINARY);
 
-    /// Find contours
+    // Find contours
     std::vector<std::vector<cv::Point> > contours1, contours2;
     cv::findContours(threshOutput1, contours1, hierarchy1,
                       cv::RETR_TREE, cv::CHAIN_APPROX_SIMPLE, cv::Point2f(0, 0));
     cv::findContours(threshOutput2, contours2, hierarchy2,
                       cv::RETR_TREE, cv::CHAIN_APPROX_SIMPLE, cv::Point2f(0, 0));
 
-    /// Approximate contours to polygons + get bounding rects and circles
-    /// First Picture
+    // Approximate contours to polygons + get bounding rects and circles
+    // First Picture
     std::vector<std::vector<cv::Point> > contoursPoly1, contoursPoly2;
     contoursPoly1.resize(contours1.size());
     boundRect1.resize(contours1.size());
 
-    ///Second Picture
+    // Second Picture
     contoursPoly2.resize(contours2.size());
     boundRect2.resize(contours2.size());
 

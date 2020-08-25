@@ -43,7 +43,7 @@ class STTImethod
 public:
     STTImethod(const cv::Mat &inImg, const cv::Mat &targImg, int res_x,
                             int res_y, ColorMode cMode, DrawMode dMode);
-    ~STTImethod() { }
+    ~STTImethod() = default;
 
     glm::vec4 computeSTTI(std::vector<float> &F1, std::vector<float> &F2, float f1,
                           float f2, float unSmoothF1, float unSmoothF2, glm::vec2 uv);

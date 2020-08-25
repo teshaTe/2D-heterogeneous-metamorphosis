@@ -23,8 +23,8 @@ enum class InterType
 class inter2D
 {
 public:
-    inter2D() {}
-    ~inter2D() {}
+    inter2D() = default;
+    ~inter2D() = default;
 
     std::vector<float> geoToolsResample2D(std::vector<float> *field, InterType type, glm::ivec2 inRes,
                                                 glm::ivec2 outRes, glm::vec2 step, bool precise=true);
