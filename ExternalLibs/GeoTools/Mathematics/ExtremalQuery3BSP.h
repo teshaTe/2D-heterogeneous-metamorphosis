@@ -1,9 +1,9 @@
 // David Eberly, Geometric Tools, Redmond WA 98052
-// Copyright (c) 1998-2020
+// Copyright (c) 1998-2021
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// Version: 4.0.2019.08.13
+// Version: 4.0.2020.11.16
 
 #pragma once
 
@@ -30,7 +30,7 @@ namespace gte
             int const numTriangles = static_cast<int>(indices.size() / 3);
             for (int t = 0; t < numTriangles; ++t)
             {
-                int V[3];
+                std::array<int, 3> V = { 0, 0, 0 };
                 for (int j = 0; j < 3; ++j)
                 {
                     V[j] = indices[3 * t + j];
@@ -134,6 +134,7 @@ namespace gte
                 :
                 nIndex{ -1, -1 },
                 separation(0),
+                normal(Vector3<Real>::Zero()),
                 posVertex(-1),
                 negVertex(-1),
                 posChild(-1),
@@ -177,8 +178,8 @@ namespace gte
         typedef VETManifoldMesh::Triangle Triangle;
 
         void SortAdjacentTriangles(int vIndex,
-            std::set<std::shared_ptr<Triangle>> const& tAdj,
-            std::vector<std::shared_ptr<Triangle>>& tAdjSorted)
+            std::unordered_set<Triangle*> const& tAdj,
+            std::vector<Triangle*>& tAdjSorted)
         {
             // Copy the set of adjacent triangles into a vector container.
             int const numTriangles = static_cast<int>(tAdj.size());
@@ -187,7 +188,7 @@ namespace gte
             // Traverse the triangles adjacent to vertex V using edge-triangle
             // adjacency information to produce a sorted array of adjacent
             // triangles.
-            auto tri = *tAdj.begin();
+            Triangle* tri = *tAdj.begin();
             for (int i = 0; i < numTriangles; ++i)
             {
                 for (int prev = 2, curr = 0; curr < 3; prev = curr++)
@@ -195,7 +196,7 @@ namespace gte
                     if (tri->V[curr] == vIndex)
                     {
                         tAdjSorted[i] = tri;
-                        tri = tri->T[prev].lock();
+                        tri = tri->T[prev];
                         break;
                     }
                 }
@@ -209,15 +210,18 @@ namespace gte
 
             for (auto const& element : mesh.GetEdges())
             {
-                auto edge = element.second;
+                auto const& edge = element.second;
 
+                // VS 2019 16.8.1 generates LNT1006 "Local variable is not
+                // initialized." Incorrect, because the default constructor
+                // initializes all the members.
                 SphericalArc arc;
-                arc.nIndex[0] = mTriToNormal[edge->T[0].lock()];
-                arc.nIndex[1] = mTriToNormal[edge->T[1].lock()];
+                arc.nIndex[0] = mTriToNormal[edge->T[0]];
+                arc.nIndex[1] = mTriToNormal[edge->T[1]];
                 arc.separation = 1;
                 arc.normal = Cross(this->mFaceNormals[arc.nIndex[0]], this->mFaceNormals[arc.nIndex[1]]);
 
-                auto adj = edge->T[0].lock();
+                Triangle* adj = edge->T[0];
                 int j;
                 for (j = 0; j < 3; ++j)
                 {
@@ -243,9 +247,9 @@ namespace gte
             {
                 // Sort the normals into a counterclockwise spherical polygon
                 // when viewed from outside the sphere.
-                auto vertex = element.second;
+                auto const& vertex = element.second;
                 int const vIndex = vertex->V;
-                std::vector<std::shared_ptr<Triangle>> tAdjSorted;
+                std::vector<Triangle*> tAdjSorted;
                 SortAdjacentTriangles(vIndex, vertex->TAdjacent, tAdjSorted);
                 int const numTriangles = static_cast<int>(vertex->TAdjacent.size());
                 queue.push(std::make_pair(0, numTriangles));
@@ -259,6 +263,10 @@ namespace gte
                     {
                         if (i1 < numTriangles)
                         {
+                            // VS 2019 16.8.1 generates LNT1006 "Local
+                            // variable is not initialized." Incorrect,
+                            // because the default constructor initializes
+                            // all the members.
                             SphericalArc arc;
                             arc.nIndex[0] = mTriToNormal[tAdjSorted[i0]];
                             arc.nIndex[1] = mTriToNormal[tAdjSorted[i1]];
@@ -410,7 +418,7 @@ namespace gte
         }
 
         // Lookup table for indexing into mFaceNormals.
-        std::map<std::shared_ptr<Triangle>, int> mTriToNormal;
+        std::map<Triangle*, int> mTriToNormal;
 
         // Fixed-size storage for the BSP nodes.
         std::vector<SphericalArc> mNodes;

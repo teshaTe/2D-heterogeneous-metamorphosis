@@ -1,9 +1,9 @@
 // David Eberly, Geometric Tools, Redmond WA 98052
-// Copyright (c) 1998-2020
+// Copyright (c) 1998-2021
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// Version: 4.1.2019.10.17
+// Version: 4.1.2020.09.08
 
 #pragma once
 
@@ -28,28 +28,28 @@ namespace gte
             :
             mEndpoints{ static_cast<APType>(0), static_cast<APType>(0) }
         {
-            static_assert(gte::is_arbitrary_precision<APType>::value, "Invalid type.");
+            static_assert(is_arbitrary_precision<APType>::value, "Invalid type.");
         }
 
         APInterval(APInterval const& other)
             :
             mEndpoints(other.mEndpoints)
         {
-            static_assert(gte::is_arbitrary_precision<APType>::value, "Invalid type.");
+            static_assert(is_arbitrary_precision<APType>::value, "Invalid type.");
         }
 
         explicit APInterval(APType e)
             :
             mEndpoints{ e, e }
         {
-            static_assert(gte::is_arbitrary_precision<APType>::value, "Invalid type.");
+            static_assert(is_arbitrary_precision<APType>::value, "Invalid type.");
         }
 
         APInterval(APType e0, APType e1)
             :
             mEndpoints{ e0, e1 }
         {
-            static_assert(gte::is_arbitrary_precision<APType>::value, "Invalid type.");
+            static_assert(is_arbitrary_precision<APType>::value, "Invalid type.");
 #if defined(GTE_THROW_ON_INVALID_APINTERVAL)
             LogAssert(mEndpoints[0] <= mEndpoints[1], "Invalid interval.");
 #endif
@@ -59,7 +59,7 @@ namespace gte
             :
             mEndpoints(endpoint)
         {
-            static_assert(gte::is_arbitrary_precision<APType>::value, "Invalid type.");
+            static_assert(is_arbitrary_precision<APType>::value, "Invalid type.");
 #if defined(GTE_THROW_ON_INVALID_APINTERVAL)
             LogAssert(mEndpoints[0] <= mEndpoints[1], "Invalid interval.");
 #endif
@@ -67,7 +67,7 @@ namespace gte
 
         APInterval& operator=(APInterval const& other)
         {
-            static_assert(gte::is_arbitrary_precision<APType>::value, "Invalid type.");
+            static_assert(is_arbitrary_precision<APType>::value, "Invalid type.");
             mEndpoints = other.mEndpoints;
             return *this;
         }
@@ -244,13 +244,13 @@ namespace gte
 
     // Addition operations.
     template <typename APType>
-    APInterval<APType> operator+(APType u, APInterval<APType> const& v)
+    APInterval<APType> operator+(APType const& u, APInterval<APType> const& v)
     {
         return APInterval<APType>::Add(u, u, v[0], v[1]);
     }
 
     template <typename APType>
-    APInterval<APType> operator+(APInterval<APType> const& u, APType v)
+    APInterval<APType> operator+(APInterval<APType> const& u, APType const& v)
     {
         return APInterval<APType>::Add(u[0], u[1], v, v);
     }
@@ -261,15 +261,29 @@ namespace gte
         return APInterval<APType>::Add(u[0], u[1], v[0], v[1]);
     }
 
+    template <typename APType>
+    APInterval<APType>& operator+=(APInterval<APType>& u, APType const& v)
+    {
+        u = u + v;
+        return u;
+    }
+
+    template <typename APType>
+    APInterval<APType>& operator+=(APInterval<APType>& u, APInterval<APType> const& v)
+    {
+        u = u + v;
+        return u;
+    }
+
     // Subtraction operations.
     template <typename APType>
-    APInterval<APType> operator-(APType u, APInterval<APType> const& v)
+    APInterval<APType> operator-(APType const& u, APInterval<APType> const& v)
     {
         return APInterval<APType>::Sub(u, u, v[0], v[1]);
     }
 
     template <typename APType>
-    APInterval<APType> operator-(APInterval<APType> const& u, APType v)
+    APInterval<APType> operator-(APInterval<APType> const& u, APType const& v)
     {
         return APInterval<APType>::Sub(u[0], u[1], v, v);
     }
@@ -280,9 +294,23 @@ namespace gte
         return APInterval<APType>::Sub(u[0], u[1], v[0], v[1]);
     }
 
+    template <typename APType>
+    APInterval<APType>& operator-=(APInterval<APType>& u, APType const& v)
+    {
+        u = u - v;
+        return u;
+    }
+
+    template <typename APType>
+    APInterval<APType>& operator-=(APInterval<APType>& u, APInterval<APType> const& v)
+    {
+        u = u - v;
+        return u;
+    }
+
     // Multiplication operations.
     template <typename APType>
-    APInterval<APType> operator*(APType u, APInterval<APType> const& v)
+    APInterval<APType> operator*(APType const& u, APInterval<APType> const& v)
     {
         APType const zero = static_cast<APType>(0);
         if (u >= zero)
@@ -296,7 +324,7 @@ namespace gte
     }
 
     template <typename APType>
-    APInterval<APType> operator*(APInterval<APType> const& u, APType v)
+    APInterval<APType> operator*(APInterval<APType> const& u, APType const& v)
     {
         APType const zero = static_cast<APType>(0);
         if (v >= zero)
@@ -360,12 +388,26 @@ namespace gte
         }
     }
 
+    template <typename APType>
+    APInterval<APType>& operator*=(APInterval<APType>& u, APType const& v)
+    {
+        u = u * v;
+        return u;
+    }
+
+    template <typename APType>
+    APInterval<APType>& operator*=(APInterval<APType>& u, APInterval<APType> const& v)
+    {
+        u = u * v;
+        return u;
+    }
+
     // Division operations. If the divisor interval is [v0,v1] with
     // v0 < 0 < v1, then the returned interval is (-infinity,+infinity)
     // instead of Union((-infinity,1/v0),(1/v1,+infinity)). An application
     // should try to avoid this case by branching based on [v0,0] and [0,v1].
     template <typename APType>
-    APInterval<APType> operator/(APType u, APInterval<APType> const& v)
+    APInterval<APType> operator/(APType const& u, APInterval<APType> const& v)
     {
         APType const zero = static_cast<APType>(0);
         if (v[0] > zero || v[1] < zero)
@@ -390,7 +432,7 @@ namespace gte
     }
 
     template <typename APType>
-    APInterval<APType> operator/(APInterval<APType> const& u, APType v)
+    APInterval<APType> operator/(APInterval<APType> const& u, APType const& v)
     {
         APType const zero = static_cast<APType>(0);
         if (v > zero)
@@ -430,5 +472,19 @@ namespace gte
                 return APInterval<APType>::Reals();
             }
         }
+    }
+
+    template <typename APType>
+    APInterval<APType>& operator/=(APInterval<APType>& u, APType const& v)
+    {
+        u = u / v;
+        return u;
+    }
+
+    template <typename APType>
+    APInterval<APType>& operator/=(APInterval<APType>& u, APInterval<APType> const& v)
+    {
+        u = u / v;
+        return u;
     }
 }

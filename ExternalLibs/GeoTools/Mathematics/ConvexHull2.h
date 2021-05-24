@@ -1,36 +1,22 @@
 // David Eberly, Geometric Tools, Redmond WA 98052
-// Copyright (c) 1998-2020
+// Copyright (c) 1998-2021
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// Version: 4.0.2019.08.13
+// Version: 4.0.2020.09.01
 
 #pragma once
 
 // Compute the convex hull of 2D points using a divide-and-conquer algorithm.
-// This is an O(N log N) algorithm for N input points.  The only way to ensure
-// a correct result for the input vertices (assumed to be exact) is to choose
-// ComputeType for exact rational arithmetic.  You may use BSNumber.  No
-// divisions are performed in this computation, so you do not have to use
-// BSRational.
-//
-// The worst-case choices of N for Real of type BSNumber or BSRational with
-// integer storage UIntegerFP32<N> are listed in the next table.  The numerical
-// computations are encapsulated in PrimalQuery2<Real>::ToLineExtended.  We
-// recommend using only BSNumber, because no divisions are performed in the
-// convex-hull computations.
-//
-//    input type | compute type | N
-//    -----------+--------------+------
-//    float      | BSNumber     |   18
-//    double     | BSNumber     |  132
-//    float      | BSRational   |  214
-//    double     | BSRational   | 1587
+// This is an O(N log N) algorithm for N input points. The only way to ensure
+// a correct result for the input vertices is to use an exact predicate for
+// computing signs of various expressions. The implementation uses interval
+// arithmetic and rational arithmetic for the predicate.
 
-#include <Mathematics/Logger.h>
-#include <Mathematics/PrimalQuery2.h>
+#include <Mathematics/ArbitraryPrecision.h>
+#include <Mathematics/FPInterval.h>
 #include <Mathematics/Line.h>
-#include <vector>
+#include <Mathematics/Vector2.h>
 
 // Uncomment this to assert when an infinite loop is encountered in
 // ConvexHull2::GetTangent.
@@ -38,49 +24,59 @@
 
 namespace gte
 {
-    template <typename InputType, typename ComputeType>
+    // The Real must be 'float' or 'double'.
+    template <typename Real>
     class ConvexHull2
     {
     public:
+        // Supporting constants and types for rational arithmetic used in
+        // the exact predicate for sign computations.
+        static int constexpr NumWords = std::is_same<Real, float>::value ? 18 : 132;
+        using Rational = BSNumber<UIntegerFP32<NumWords>>;
+        using Interval = FPInterval<Real>;
+
         // The class is a functor to support computing the convex hull of
         // multiple data sets using the same class object.
         ConvexHull2()
             :
-            mEpsilon((InputType)0),
+            mEpsilon(static_cast<Real>(0)),
             mDimension(0),
-            mLine(Vector2<InputType>::Zero(), Vector2<InputType>::Zero()),
+            mLine(Vector2<Real>::Zero(), Vector2<Real>::Zero()),
+            mRationalPoints{},
+            mConverted{},
             mNumPoints(0),
             mNumUniquePoints(0),
             mPoints(nullptr)
         {
+            static_assert(std::is_floating_point<Real>::value,
+                "The input type must be 'float' or 'double'.");
         }
 
-        // The input is the array of points whose convex hull is required.
-        // The epsilon value is used to determine the intrinsic dimensionality
-        // of the vertices (d = 0, 1, or 2).  When epsilon is positive, the
+        // The input is the array of points whose convex hull is required. The
+        // epsilon value is used to determine the intrinsic dimensionality of
+        // the vertices (d = 0, 1, or 2).  When epsilon is positive, the
         // determination is fuzzy: points approximately the same point,
         // approximately on a line, or planar.  The return value is 'true' if
-        // and only if the hull/ construction is successful.
-        bool operator()(int numPoints, Vector2<InputType> const* points, InputType epsilon)
+        // and only if the hull construction is successful.
+        bool operator()(int numPoints, Vector2<Real> const* points, Real epsilon)
         {
-            mEpsilon = std::max(epsilon, (InputType)0);
+            mEpsilon = std::max(epsilon, static_cast<Real>(0));
             mDimension = 0;
-            mLine.origin = Vector2<InputType>::Zero();
-            mLine.direction = Vector2<InputType>::Zero();
+            mLine.origin = Vector2<Real>::Zero();
+            mLine.direction = Vector2<Real>::Zero();
             mNumPoints = numPoints;
             mNumUniquePoints = 0;
             mPoints = points;
             mMerged.clear();
             mHull.clear();
 
-            int i, j;
             if (mNumPoints < 3)
             {
                 // ConvexHull2 should be called with at least three points.
                 return false;
             }
 
-            IntrinsicsVector2<InputType> info(mNumPoints, mPoints, mEpsilon);
+            IntrinsicsVector2<Real> info(mNumPoints, mPoints, mEpsilon);
             if (info.dimension == 0)
             {
                 // mDimension is 0
@@ -91,26 +87,21 @@ namespace gte
             {
                 // The set is (nearly) collinear.
                 mDimension = 1;
-                mLine = Line2<InputType>(info.origin, info.direction[0]);
+                mLine = Line2<Real>(info.origin, info.direction[0]);
                 return false;
             }
 
             mDimension = 2;
 
-            // Compute the points for the queries.
-            mComputePoints.resize(mNumPoints);
-            mQuery.Set(mNumPoints, &mComputePoints[0]);
-            for (i = 0; i < mNumPoints; ++i)
-            {
-                for (j = 0; j < 2; ++j)
-                {
-                    mComputePoints[i][j] = points[i][j];
-                }
-            }
+            // Allocate storage for any rational points that must be
+            // computed in the exact predicate.
+            mRationalPoints.resize(mNumPoints);
+            mConverted.resize(mNumPoints);
+            std::fill(mConverted.begin(), mConverted.end(), 0u);
 
             // Sort the points.
             mHull.resize(mNumPoints);
-            for (i = 0; i < mNumPoints; ++i)
+            for (int i = 0; i < mNumPoints; ++i)
             {
                 mHull[i] = i;
             }
@@ -139,7 +130,7 @@ namespace gte
             mHull.erase(newEnd, mHull.end());
             mNumUniquePoints = static_cast<int>(mHull.size());
 
-            // Use a divide-and-conquer algorithm.  The merge step computes
+            // Use a divide-and-conquer algorithm. The merge step computes
             // the convex hull of two convex polygons.
             mMerged.resize(mNumUniquePoints);
             int i0 = 0, i1 = mNumUniquePoints - 1;
@@ -148,11 +139,11 @@ namespace gte
             return true;
         }
 
-        // Dimensional information.  If GetDimension() returns 1, the points
-        // lie on a line P+t*D (fuzzy comparison when epsilon > 0).  You can
+        // Dimensional information. If GetDimension() returns 1, the points
+        // lie on a line P+t*D (fuzzy comparison when epsilon > 0). You can
         // sort these if you need a polyline output by projecting onto the
         // line each vertex X = P+t*D, where t = Dot(D,X-P).
-        inline InputType GetEpsilon() const
+        inline Real GetEpsilon() const
         {
             return mEpsilon;
         }
@@ -162,7 +153,7 @@ namespace gte
             return mDimension;
         }
 
-        inline Line2<InputType> const& GetLine() const
+        inline Line2<Real> const& GetLine() const
         {
             return mLine;
         }
@@ -178,14 +169,9 @@ namespace gte
             return mNumUniquePoints;
         }
 
-        inline Vector2<InputType> const* GetPoints() const
+        inline Vector2<Real> const* GetPoints() const
         {
             return mPoints;
-        }
-
-        inline PrimalQuery2<ComputeType> const& GetQuery() const
-        {
-            return mQuery;
         }
 
         // The convex hull is a convex polygon whose vertices are listed in
@@ -219,21 +205,21 @@ namespace gte
         void Merge(int j0, int j1, int j2, int j3, int& i0, int& i1)
         {
             // Subhull0 is to the left of subhull1 because of the initial
-            // sorting of the points by x-components.  We need to find two
+            // sorting of the points by x-components. We need to find two
             // mutually visible points, one on the left subhull and one on
             // the right subhull.
             int size0 = j1 - j0 + 1;
             int size1 = j3 - j2 + 1;
 
             int i;
-            Vector2<ComputeType> p;
+            Vector2<Real> p;
 
             // Find the right-most point of the left subhull.
-            Vector2<ComputeType> pmax0 = mComputePoints[mHull[j0]];
+            Vector2<Real> pmax0 = mPoints[mHull[j0]];
             int imax0 = j0;
             for (i = j0 + 1; i <= j1; ++i)
             {
-                p = mComputePoints[mHull[i]];
+                p = mPoints[mHull[i]];
                 if (pmax0 < p)
                 {
                     pmax0 = p;
@@ -242,11 +228,11 @@ namespace gte
             }
 
             // Find the left-most point of the right subhull.
-            Vector2<ComputeType> pmin1 = mComputePoints[mHull[j2]];
+            Vector2<Real> pmin1 = mPoints[mHull[j2]];
             int imin1 = j2;
             for (i = j2 + 1; i <= j3; ++i)
             {
-                p = mComputePoints[mHull[i]];
+                p = mPoints[mHull[i]];
                 if (p < pmin1)
                 {
                     pmin1 = p;
@@ -314,22 +300,21 @@ namespace gte
             int size1 = j3 - j2 + 1;
             int const imax = size0 + size1;
             int i, iLm1, iRp1;
-            Vector2<ComputeType> L0, L1, R0, R1;
+            int L0index, L1index, R0index, R1index;
 
             for (i = 0; i < imax; i++)
             {
                 // Get the endpoints of the potential tangent.
-                L1 = mComputePoints[mHull[i0]];
-                R0 = mComputePoints[mHull[i1]];
+                L1index = mHull[i0];
+                R0index = mHull[i1];
 
                 // Walk along the left hull to find the point of tangency.
                 if (size0 > 1)
                 {
                     iLm1 = (i0 > j0 ? i0 - 1 : j1);
-                    L0 = mComputePoints[mHull[iLm1]];
-                    auto order = mQuery.ToLineExtended(R0, L0, L1);
-                    if (order == PrimalQuery2<ComputeType>::ORDER_NEGATIVE
-                        || order == PrimalQuery2<ComputeType>::ORDER_COLLINEAR_RIGHT)
+                    L0index = mHull[iLm1];
+                    auto order = ToLineExtended(R0index, L0index, L1index);
+                    if (order == Order::NEGATIVE || order == Order::COLLINEAR_RIGHT)
                     {
                         i0 = iLm1;
                         continue;
@@ -340,10 +325,9 @@ namespace gte
                 if (size1 > 1)
                 {
                     iRp1 = (i1 < j3 ? i1 + 1 : j2);
-                    R1 = mComputePoints[mHull[iRp1]];
-                    auto order = mQuery.ToLineExtended(L1, R0, R1);
-                    if (order == PrimalQuery2<ComputeType>::ORDER_NEGATIVE
-                        || order == PrimalQuery2<ComputeType>::ORDER_COLLINEAR_LEFT)
+                    R1index = mHull[iRp1];
+                    auto order = ToLineExtended(L1index, R0index, R1index);
+                    if (order == Order::NEGATIVE || order == Order::COLLINEAR_LEFT)
                     {
                         i1 = iRp1;
                         continue;
@@ -361,26 +345,224 @@ namespace gte
 #endif
         }
 
-        // The epsilon value is used for fuzzy determination of intrinsic
-        // dimensionality.  If the dimension is 0 or 1, the constructor
-        // returns early.  The caller is responsible for retrieving the
-        // dimension and taking an alternate path should the dimension be
-        // smaller than 2.  If the dimension is 0, the caller may as well
-        // treat all points[] as a single point, say, points[0].  If the
-        // dimension is 1, the caller can query for the approximating line
-        // and project points[] onto it for further processing.
-        InputType mEpsilon;
-        int mDimension;
-        Line2<InputType> mLine;
+        // Memoized access to the rational representation of the points.
+        Vector2<Rational> const& GetRationalPoint(int index) const
+        {
+            if (mConverted[index] == 0)
+            {
+                mConverted[index] = 1;
+                for (int i = 0; i < 2; ++i)
+                {
+                    mRationalPoints[index][i] = mPoints[index][i];
+                }
+            }
+            return mRationalPoints[index];
+        }
 
-        // The array of points used for geometric queries.  If you want to
-        // be certain of a correct result, choose ComputeType to be BSNumber.
-        std::vector<Vector2<ComputeType>> mComputePoints;
-        PrimalQuery2<ComputeType> mQuery;
+        // An extended classification of the relationship of a point to a line
+        // segment.  For noncollinear points, the return value is
+        //   POSITIVE when <P,Q0,Q1> is a counterclockwise triangle
+        //   NEGATIVE when <P,Q0,Q1> is a clockwise triangle
+        // For collinear points, the line direction is Q1-Q0.  The return
+        // value is
+        //   COLLINEAR_LEFT when the line ordering is <P,Q0,Q1>
+        //   COLLINEAR_RIGHT when the line ordering is <Q0,Q1,P>
+        //   COLLINEAR_CONTAIN when the line ordering is <Q0,P,Q1>
+        enum class Order
+        {
+            Q0_EQUALS_Q1,
+            P_EQUALS_Q0,
+            P_EQUALS_Q1,
+            POSITIVE,
+            NEGATIVE,
+            COLLINEAR_LEFT,
+            COLLINEAR_RIGHT,
+            COLLINEAR_CONTAIN
+        };
+
+        Order ToLineExtended(int pIndex, int q0Index, int q1Index) const
+        {
+            Vector2<Real> const& P = mPoints[pIndex];
+            Vector2<Real> const& Q0 = mPoints[q0Index];
+            Vector2<Real> const& Q1 = mPoints[q1Index];
+
+            if (Q1[0] == Q0[0] && Q1[1] == Q0[1])
+            {
+                return Order::Q0_EQUALS_Q1;
+            }
+
+            if (P[0] == Q0[0] && P[1] == Q0[1])
+            {
+                return Order::P_EQUALS_Q0;
+            }
+
+            if (P[0] == Q1[0] && P[1] == Q1[1])
+            {
+                return Order::P_EQUALS_Q1;
+            }
+
+            // The theoretical classification relies on computing exactly the
+            // sign of the determinant.  Numerical roundoff errors can cause
+            // misclassification.
+            Real const zero(0);
+            Interval ip0(P[0]), ip1(P[1]);
+            Interval iq00(Q0[0]), iq01(Q0[1]), iq10(Q1[0]), iq11(Q1[1]);
+            Interval ix0 = iq10 - iq00, iy0 = iq11 - iq01;
+            Interval ix1 = ip0 - iq00, iy1 = ip1 - iq01;
+            Interval ix0y1 = ix0 * iy1;
+            Interval ix1y0 = ix1 * iy0;
+            Interval iDet = ix0y1 - ix1y0;
+            int32_t sign;
+
+            Vector2<Rational> rDiff0, rDiff1;
+            Rational rDot;
+            bool rDiff0Computed = false;
+            bool rDiff1Computed = false;
+            bool rDotComputed = false;
+
+            if (iDet[0] > zero)
+            {
+                sign = +1;
+            }
+            else if (iDet[1] < zero)
+            {
+                sign = -1;
+            }
+            else
+            {
+                // The exact sign of the determinant is not known, so compute
+                // the determinant using rational arithmetic.
+                auto const& rP = GetRationalPoint(pIndex);
+                auto const& rQ0 = GetRationalPoint(q0Index);
+                auto const& rQ1 = GetRationalPoint(q1Index);
+                rDiff0 = rQ1 - rQ0;
+                rDiff1 = rP - rQ0;
+                auto rDet = DotPerp(rDiff0, rDiff1);
+                rDiff0Computed = true;
+                rDiff1Computed = true;
+                sign = rDet.GetSign();
+            }
+
+            if (sign > 0)
+            {
+                // The points form a counterclockwise triangle <P,Q0,Q1>.
+                return Order::POSITIVE;
+            }
+            else if (sign < 0)
+            {
+                // The points form a clockwise triangle <P,Q1,Q0>.
+                return Order::NEGATIVE;
+            }
+            else
+            {
+                // The points are collinear. P is on the line through Q0
+                // and Q1.
+                Interval iDot = ix0 * ix1 + iy0 * iy1;
+                if (iDot[0] > zero)
+                {
+                    sign = +1;
+                }
+                else if (iDot[1] < zero)
+                {
+                    sign = -1;
+                }
+                else
+                {
+                    // The exact sign of the dot product is not known, so
+                    // compute the dot product using rational arithmetic.
+                    auto const& rP = GetRationalPoint(pIndex);
+                    auto const& rQ0 = GetRationalPoint(q0Index);
+                    auto const& rQ1 = GetRationalPoint(q1Index);
+                    if (!rDiff0Computed)
+                    {
+                        rDiff0 = rQ1 - rQ0;
+                    }
+                    if (!rDiff1Computed)
+                    {
+                        rDiff1 = rP - rQ0;
+                    }
+                    rDot = Dot(rDiff0, rDiff1);
+                    rDotComputed = true;
+                    sign = rDot.GetSign();
+                }
+
+                if (sign < zero)
+                {
+                    // The line ordering is <P,Q0,Q1>.
+                    return Order::COLLINEAR_LEFT;
+                }
+
+                Interval iSqrLength = ix0 * ix0 + iy0 * iy0;
+                Interval iTest = iDot - iSqrLength;
+                if (iTest[0] > zero)
+                {
+                    sign = +1;
+                }
+                else if (iTest[1] < zero)
+                {
+                    sign = -1;
+                }
+                else
+                {
+                    // The exact sign of the test is not known, so
+                    // compute the test using rational arithmetic.
+                    auto const& rP = GetRationalPoint(pIndex);
+                    auto const& rQ0 = GetRationalPoint(q0Index);
+                    auto const& rQ1 = GetRationalPoint(q1Index);
+                    if (!rDiff0Computed)
+                    {
+                        rDiff0 = rQ1 - rQ0;
+                    }
+                    if (!rDiff1Computed)
+                    {
+                        rDiff1 = rP - rQ0;
+                    }
+                    if (!rDotComputed)
+                    {
+                        rDot = Dot(rDiff0, rDiff1);
+                    }
+                    auto rSqrLength = Dot(rDiff0, rDiff0);
+                    auto rTest = rDot - rSqrLength;
+                    sign = rTest.GetSign();
+                }
+
+                if (sign > 0)
+                {
+                    // The line ordering is <Q0,Q1,P>.
+                    return Order::COLLINEAR_RIGHT;
+                }
+
+                // The line ordering is <Q0,P,Q1> with P strictly between
+                // Q0 and Q1.
+                return Order::COLLINEAR_CONTAIN;
+            }
+        }
+
+        // The epsilon value is used for fuzzy determination of intrinsic
+        // dimensionality. If the dimension is 0 or 1, the constructor returns
+        // early. The caller is responsible for retrieving the dimension and
+        // taking an alternate path should the dimension be smaller than 2.
+        // If the dimension is 0, the caller may as well treat all points[]
+        // as a single point, say, points[0]. If the dimension is 1, the
+        // caller can query for the approximating line and project points[]
+        // onto it for further processing.
+        Real mEpsilon;
+        int mDimension;
+        Line2<Real> mLine;
+
+        // The array of rational points used for the exact predicate. The
+        // mConverted array is used to store 0 or 1, where initially the
+        // values are 0. The first time mComputePoints[i] is encountered,
+        // mConverted[i] is 0. The floating-point vector is converted to
+        // a rational number, after which mConverted[1] is set to 1 to
+        // avoid converting again if the floating-point vector is
+        // encountered in another predicate computation.
+        mutable std::vector<Vector2<Rational>> mRationalPoints;
+        mutable std::vector<uint32_t> mConverted;
 
         int mNumPoints;
         int mNumUniquePoints;
-        Vector2<InputType> const* mPoints;
+        Vector2<Real> const* mPoints;
         std::vector<int> mMerged, mHull;
     };
 }

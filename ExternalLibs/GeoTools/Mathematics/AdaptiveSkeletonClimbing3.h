@@ -1,9 +1,9 @@
 // David Eberly, Geometric Tools, Redmond WA 98052
-// Copyright (c) 1998-2020
+// Copyright (c) 1998-2021
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// Version: 4.0.2020.01.08
+// Version: 4.0.2020.09.14
 
 #pragma once
 
@@ -526,7 +526,16 @@ namespace gte
                     int v0 = static_cast<int>(positions.size());
                     int v1 = v0 + 1;
                     int v2 = v1 + 1;
-                    triangles.push_back(Triangle(v0, v1, v2));
+                    // Bypassing the constructor to avoid a warning in the
+                    // release build by gcc 7.5.0 on Ubuntu 18.04.5 LTS:
+                    // "assuming signed overflow does not occur when assuming
+                    // that (X + c) >= X is always true." The correct
+                    // constructor case is used because v0 < v1 < v2.
+                    Triangle tkey;
+                    tkey.V[0] = v0;
+                    tkey.V[1] = v1;
+                    tkey.V[2] = v2;
+                    triangles.push_back(tkey);
                     positions.push_back(mVertices[triangle.V[0]].position);
                     positions.push_back(mVertices[triangle.V[1]].position);
                     positions.push_back(mVertices[triangle.V[2]].position);
@@ -569,7 +578,16 @@ namespace gte
                 {
                     v2 = v1 + 1;
                     positions.push_back(mVertices[i2].position);
-                    triangles.push_back(Triangle(v0, v1, v2));
+                    // Bypassing the constructor to avoid a warning in the
+                    // release build by gcc 7.5.0 on Ubuntu 18.04.5 LTS:
+                    // "assuming signed overflow does not occur when assuming
+                    // that (X + c) >= X is always true." The correct
+                    // constructor case is used because v0 < v1 < v2.
+                    Triangle tkey;
+                    tkey.V[0] = v0;
+                    tkey.V[1] = v1;
+                    tkey.V[2] = v2;
+                    triangles.push_back(tkey);
                     if (mVertices[i2].adjacent[1] != i1)
                     {
                         i1 = i2;
@@ -584,6 +602,8 @@ namespace gte
                 }
 
                 v2 = v0 + 1;
+                // Unlike the previous two constructor calls, it is not
+                // guaranteed that v0 < v1.
                 triangles.push_back(Triangle(v0, v1, v2));
             }
 

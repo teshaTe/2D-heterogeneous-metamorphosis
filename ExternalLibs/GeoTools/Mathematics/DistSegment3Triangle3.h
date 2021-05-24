@@ -1,9 +1,9 @@
 // David Eberly, Geometric Tools, Redmond WA 98052
-// Copyright (c) 1998-2020
+// Copyright (c) 1998-2021
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// Version: 4.0.2019.08.13
+// Version: 4.0.2020.05.03
 
 #pragma once
 
@@ -57,6 +57,9 @@ namespace gte
                     result.sqrDistance = ptResult.sqrDistance;
                     result.distance = ptResult.distance;
                     result.segmentParameter = segExtent;
+                    result.triangleParameter[0] = ptResult.parameter[0];
+                    result.triangleParameter[1] = ptResult.parameter[1];
+                    result.triangleParameter[2] = ptResult.parameter[2];
                     result.closestPoint[0] = point;
                     result.closestPoint[1] = ptResult.closest;
                 }
@@ -68,7 +71,10 @@ namespace gte
                 auto ptResult = ptQuery(point, triangle);
                 result.sqrDistance = ptResult.sqrDistance;
                 result.distance = ptResult.distance;
-                result.segmentParameter = segExtent;
+                result.segmentParameter = -segExtent;
+                result.triangleParameter[0] = ptResult.parameter[0];
+                result.triangleParameter[1] = ptResult.parameter[1];
+                result.triangleParameter[2] = ptResult.parameter[2];
                 result.closestPoint[0] = point;
                 result.closestPoint[1] = ptResult.closest;
             }

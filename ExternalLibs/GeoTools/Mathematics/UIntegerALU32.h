@@ -1,9 +1,9 @@
 // David Eberly, Geometric Tools, Redmond WA 98052
-// Copyright (c) 1998-2020
+// Copyright (c) 1998-2021
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// Version: 4.0.2019.09.03
+// Version: 4.0.2020.02.21
 
 #pragma once
 
@@ -109,7 +109,7 @@ namespace gte
             }
             else
             {
-                // One or both numbers are negative.  The only time 'less than' is
+                // One or both numbers are zero. The only time 'less than' is
                 // 'true' is when 'number' is positive.
                 return nNumBits > 0;
             }
@@ -271,6 +271,16 @@ namespace gte
             }
             else
             {
+                // This block originally did not exist, only the if-block did.
+                // During some testing for the RAEGC book, a crash occurred
+                // where it appeared the block was needed. I added this block
+                // to fix the problem, but had forgotten the precondition that
+                // n0 > n1. Consequently, I did not look carefully at the
+                // inputs and call stack to determine how this could have
+                // happened. Trap this problem and analyze the call stack and
+                // inputs that lead to this case if it happens again. The call
+                // stack is started by BSNumber::SubIgnoreSign(...).
+                LogWarning("The difference of the number is zero, which violates the precondition n0 > n1.");
                 self.SetNumBits(0);
             }
         }

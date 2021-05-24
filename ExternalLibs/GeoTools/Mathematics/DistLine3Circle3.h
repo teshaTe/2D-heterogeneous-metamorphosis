@@ -1,9 +1,9 @@
 // David Eberly, Geometric Tools, Redmond WA 98052
-// Copyright (c) 1998-2020
+// Copyright (c) 1998-2021
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// Version: 4.0.2019.08.13
+// Version: 4.0.2020.05.30
 
 #pragma once
 
@@ -68,9 +68,9 @@ namespace gte
                         Real rsqr = circle.radius * circle.radius;
                         Real asqr = a * a, bsqr = b * b, dsqr = d * d;
                         Real h0 = c * dsqr - bsqr * rsqr;
-                        Real h1 = 2 * (c * d + b * dsqr - a * b * rsqr);
-                        Real h2 = c + 4 * b * d + a * dsqr - asqr * rsqr;
-                        Real h3 = 2 * (b + a * d);
+                        Real h1 = (Real)2 * (c * d + b * dsqr - a * b * rsqr);
+                        Real h2 = c + (Real)4 * b * d + a * dsqr - asqr * rsqr;
+                        Real h3 = (Real)2 * (b + a * d);
                         Real h4 = a;
 
                         std::map<Real, int> rmMap;

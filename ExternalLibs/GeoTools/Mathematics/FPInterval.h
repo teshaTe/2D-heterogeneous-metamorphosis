@@ -1,9 +1,9 @@
 // David Eberly, Geometric Tools, Redmond WA 98052
-// Copyright (c) 1998-2020
+// Copyright (c) 1998-2021
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// Version: 4.1.2019.10.09
+// Version: 4.1.2020.11.16
 
 #pragma once
 
@@ -148,6 +148,122 @@ namespace gte
             }
         }
 
+        // This function is called to compute the lower bound on the product
+        // of two intervals. Before calling the function, you need to call
+        // std::fesetround(FE_DOWNWARD). The idea is to compute lower bounds
+        // in batch mode (multiple calls of ProductLowerBound) in order to
+        // minimize FPU control word state changes.
+        static FPType ProductLowerBound(std::array<FPType, 2> const& u,
+            std::array<FPType, 2> const& v)
+        {
+            FPType const zero = static_cast<FPType>(0);
+            FPType w0;
+            if (u[0] >= zero)
+            {
+                if (v[0] >= zero)
+                {
+                    w0 = u[0] * v[0];
+                }
+                else if (v[1] <= zero)
+                {
+                    w0 = u[1] * v[0];
+                }
+                else
+                {
+                    w0 = u[1] * v[0];
+                }
+            }
+            else if (u[1] <= zero)
+            {
+                if (v[0] >= zero)
+                {
+                    w0 = u[0] * v[1];
+                }
+                else if (v[1] <= zero)
+                {
+                    w0 = u[1] * v[1];
+                }
+                else
+                {
+                    w0 = u[0] * v[1];
+                }
+            }
+            else
+            {
+                if (v[0] >= zero)
+                {
+                    w0 = u[0] * v[1];
+                }
+                else if (v[1] <= zero)
+                {
+                    w0 = u[1] * v[0];
+                }
+                else
+                {
+                    w0 = u[0] * v[0];
+                }
+            }
+            return w0;
+        }
+
+        // This function is called to compute the upper bound on the product
+        // of two intervals. Before calling the function, you need to call
+        // std::fesetround(FE_UPWARD). The idea is to compute lower bounds
+        // inbatch mode (multiple calls of ProductUpperBound) in order to
+        // minimize FPU control word state changes.
+        static FPType ProductUpperBound(std::array<FPType, 2> const& u,
+            std::array<FPType, 2> const& v)
+        {
+            FPType const zero = static_cast<FPType>(0);
+            FPType w1;
+            if (u[0] >= zero)
+            {
+                if (v[0] >= zero)
+                {
+                    w1 = u[1] * v[1];
+                }
+                else if (v[1] <= zero)
+                {
+                    w1 = u[0] * v[1];
+                }
+                else
+                {
+                    w1 = u[1] * v[1];
+                }
+            }
+            else if (u[1] <= zero)
+            {
+                if (v[0] >= zero)
+                {
+                    w1 = u[1] * v[0];
+                }
+                else if (v[1] <= zero)
+                {
+                    w1 = u[0] * v[0];
+                }
+                else
+                {
+                    w1 = u[0] * v[0];
+                }
+            }
+            else
+            {
+                if (v[0] >= zero)
+                {
+                    w1 = u[1] * v[1];
+                }
+                else if (v[1] <= zero)
+                {
+                    w1 = u[0] * v[0];
+                }
+                else
+                {
+                    w1 = u[1] * v[1];
+                }
+            }
+            return w1;
+        }
+
     private:
         std::array<FPType, 2> mEndpoints;
 
@@ -289,6 +405,20 @@ namespace gte
         return FPInterval<FPType>::Add(u[0], u[1], v[0], v[1]);
     }
 
+    template <typename FPType>
+    FPInterval<FPType>& operator+=(FPInterval<FPType>& u, FPType v)
+    {
+        u = u + v;
+        return u;
+    }
+
+    template <typename FPType>
+    FPInterval<FPType>& operator+=(FPInterval<FPType>& u, FPInterval<FPType> const& v)
+    {
+        u = u + v;
+        return u;
+    }
+
     // Subtraction operations.
     template <typename FPType>
     FPInterval<FPType> operator-(FPType u, FPInterval<FPType> const& v)
@@ -306,6 +436,20 @@ namespace gte
     FPInterval<FPType> operator-(FPInterval<FPType> const& u, FPInterval<FPType> const& v)
     {
         return FPInterval<FPType>::Sub(u[0], u[1], v[0], v[1]);
+    }
+
+    template <typename FPType>
+    FPInterval<FPType>& operator-=(FPInterval<FPType>& u, FPType v)
+    {
+        u = u - v;
+        return u;
+    }
+
+    template <typename FPType>
+    FPInterval<FPType>& operator-=(FPInterval<FPType>& u, FPInterval<FPType> const& v)
+    {
+        u = u - v;
+        return u;
     }
 
     // Multiplication operations.
@@ -388,6 +532,20 @@ namespace gte
         }
     }
 
+    template <typename FPType>
+    FPInterval<FPType>& operator*=(FPInterval<FPType>& u, FPType v)
+    {
+        u = u * v;
+        return u;
+    }
+
+    template <typename FPType>
+    FPInterval<FPType>& operator*=(FPInterval<FPType>& u, FPInterval<FPType> const& v)
+    {
+        u = u * v;
+        return u;
+    }
+
     // Division operations. If the divisor FPInterval is [v0,v1] with
     // v0 < 0 < v1, then the returned FPInterval is (-infinity,+infinity)
     // instead of Union((-infinity,1/v0),(1/v1,+infinity)). An application
@@ -458,5 +616,18 @@ namespace gte
                 return FPInterval<FPType>::Reals();
             }
         }
+    }
+
+    template <typename FPType>
+    FPInterval<FPType>& operator/=(FPInterval<FPType>& u, FPType v)
+    {
+        u = u / v;
+        return u;
+    }
+    template <typename FPType>
+    FPInterval<FPType>& operator/=(FPInterval<FPType>& u, FPInterval<FPType> const& v)
+    {
+        u = u / v;
+        return u;
     }
 }

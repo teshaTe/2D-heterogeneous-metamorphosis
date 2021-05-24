@@ -1,9 +1,9 @@
 // David Eberly, Geometric Tools, Redmond WA 98052
-// Copyright (c) 1998-2020
+// Copyright (c) 1998-2021
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// Version: 4.0.2019.09.14
+// Version: 4.0.2019.02.12
 
 #pragma once
 
@@ -19,18 +19,17 @@ namespace gte
         using FloatType = Float;
         using UIntType = UInt;
 
-        // Construction from an encoding.  Copy constructor, destructor, and
-        // assignment operator are implicitly generated.  For the 3-parameter
-        // constructor, see the comments for SetEncoding(...).
-        ~IEEEBinary() = default;
+        // The standard constructors, copy semantics and move semantics are
+        // all default behavior. The default constructor does not initialize
+        // its union member.
         IEEEBinary() = default;
+        ~IEEEBinary() = default;
+        IEEEBinary(IEEEBinary const&) = default;
+        IEEEBinary(IEEEBinary&&) = default;
+        IEEEBinary& operator=(IEEEBinary const&) = default;
+        IEEEBinary& operator=(IEEEBinary&&) = default;
 
-        IEEEBinary(IEEEBinary const& object)
-            :
-            encoding(object.encoding)
-        {
-        }
-
+        // Construction from primitive elements.
         IEEEBinary(UInt inEncoding)
             :
             encoding(inEncoding)
@@ -48,7 +47,7 @@ namespace gte
         {
         }
 
-        // Implicit conversion to floating-point type.
+        // Implicit conversions to integer type or floating-point type.
         inline operator UInt () const
         {
             return encoding;
@@ -57,13 +56,6 @@ namespace gte
         inline operator Float () const
         {
             return number;
-        }
-
-        // Assignment.
-        IEEEBinary& operator= (IEEEBinary const& object)
-        {
-            encoding = object.encoding;
-            return *this;
         }
 
         // Special constants.
@@ -95,18 +87,18 @@ namespace gte
         static UInt const NEG_INFINITY = SIGN_MASK | EXPONENT_MASK;
 
         // The types of numbers.
-        enum Classification
+        enum class Classification
         {
-            CLASS_NEG_INFINITY,
-            CLASS_NEG_SUBNORMAL,
-            CLASS_NEG_NORMAL,
-            CLASS_NEG_ZERO,
-            CLASS_POS_ZERO,
-            CLASS_POS_SUBNORMAL,
-            CLASS_POS_NORMAL,
-            CLASS_POS_INFINITY,
-            CLASS_QUIET_NAN,
-            CLASS_SIGNALING_NAN
+            NEG_INFINITY,
+            NEG_SUBNORMAL,
+            NEG_NORMAL,
+            NEG_ZERO,
+            POS_ZERO,
+            POS_SUBNORMAL,
+            POS_NORMAL,
+            POS_INFINITY,
+            QUIET_NAN,
+            SIGNALING_NAN
         };
 
         Classification GetClassification() const
@@ -118,28 +110,56 @@ namespace gte
             {
                 if (trailing == 0)
                 {
-                    return (sign != 0 ? CLASS_NEG_ZERO : CLASS_POS_ZERO);
+                    if (sign != 0)
+                    {
+                        return Classification::NEG_ZERO;
+                    }
+                    else
+                    {
+                        return Classification::POS_ZERO;
+                    }
                 }
                 else
                 {
-                    return (sign != 0 ? CLASS_NEG_SUBNORMAL : CLASS_POS_SUBNORMAL);
+                    if (sign != 0)
+                    {
+                        return Classification::NEG_SUBNORMAL;
+                    }
+                    else
+                    {
+                        return Classification::POS_SUBNORMAL;
+                    }
                 }
             }
             else if (biased < MAX_BIASED_EXPONENT)
             {
-                return (sign != 0 ? CLASS_NEG_NORMAL : CLASS_POS_NORMAL);
+                if (sign != 0)
+                {
+                    return Classification::NEG_NORMAL;
+                }
+                else
+                {
+                    return Classification::POS_NORMAL;
+                }
             }
             else if (trailing == 0)
             {
-                return (sign != 0 ? CLASS_NEG_INFINITY : CLASS_POS_INFINITY);
+                if (sign != 0)
+                {
+                    return Classification::NEG_INFINITY;
+                }
+                else
+                {
+                    return Classification::POS_INFINITY;
+                }
             }
             else if (trailing & NAN_QUIET_MASK)
             {
-                return CLASS_QUIET_NAN;
+                return Classification::QUIET_NAN;
             }
             else
             {
-                return CLASS_SIGNALING_NAN;
+                return Classification::SIGNALING_NAN;
             }
         }
 
@@ -161,7 +181,7 @@ namespace gte
         bool IsNormal() const
         {
             UInt biased = GetBiased();
-            return 0 < biased&& biased < MAX_BIASED_EXPONENT;
+            return 0 < biased && biased < MAX_BIASED_EXPONENT;
         }
 
         bool IsFinite() const
@@ -177,6 +197,14 @@ namespace gte
         bool IsNaN() const
         {
             return GetBiased() == MAX_BIASED_EXPONENT && GetTrailing() != 0;
+        }
+
+        bool IsQuietNaN() const
+        {
+            UInt trailing = GetTrailing();
+            return GetBiased() == MAX_BIASED_EXPONENT
+                && (trailing & NAN_QUIET_MASK) != 0
+                && (trailing & NAN_PAYLOAD_MASK) != 0;
         }
 
         bool IsSignalingNaN() const
@@ -204,15 +232,15 @@ namespace gte
                 {
                     if (sign != 0)
                     {
-                        // When trailing is 1, 'this' is -MIN_SUBNORMAL and next-up
-                        // is -0.
+                        // When trailing is 1, 'this' is -MIN_SUBNORMAL and
+                        // next-up is -0.
                         --trailing;
                         return SIGN_MASK | trailing;
                     }
                     else
                     {
-                        // When trailing is MAX_TRAILING, 'this' is MAX_SUBNORMAL
-                        // and next-up is MIN_NORMAL.
+                        // When trailing is MAX_TRAILING, 'this' is
+                        // MAX_SUBNORMAL and next-up is MIN_NORMAL.
                         ++trailing;
                         return trailing;
                     }
@@ -247,15 +275,15 @@ namespace gte
             }
             else if (trailing & NAN_QUIET_MASK)
             {
-                // TODO.  The IEEE standard is not clear what to do here.  Figure
-                // out what it means.
-                return 0;
+                // The number is a quiet NAN, possibly with payload.
+                // Just return the number itself.
+                return encoding;
             }
             else
             {
-                // TODO.  The IEEE standard is not clear what to do here.  Figure
-                // out what it means.
-                return 0;
+                // The number is a signaling NAN, possibly with payload.
+                // Just return the number itself.
+                return encoding;
             }
         }
 
@@ -275,15 +303,15 @@ namespace gte
                 {
                     if (sign == 0)
                     {
-                        // When trailing is 1, 'this' is MIN_SUBNORMAL and next-down
-                        // is +0.
+                        // When trailing is 1, 'this' is MIN_SUBNORMAL and
+                        // next-down is +0.
                         --trailing;
                         return trailing;
                     }
                     else
                     {
-                        // When trailing is MAX_TRAILING, 'this' is -MAX_SUBNORMAL
-                        // and next-down is -MIN_NORMAL.
+                        // When trailing is MAX_TRAILING, 'this' is
+                        // -MAX_SUBNORMAL and next-down is -MIN_NORMAL.
                         ++trailing;
                         return SIGN_MASK | trailing;
                     }
@@ -318,21 +346,21 @@ namespace gte
             }
             else if (trailing & NAN_QUIET_MASK)
             {
-                // TODO.  The IEEE standard is not clear what to do here.  Figure
-                // out what it means.
-                return 0;
+                // The number is a quiet NAN, possibly with payload.
+                // Just return the number itself.
+                return encoding;
             }
             else
             {
-                // TODO.  The IEEE standard is not clear what to do here.  Figure
-                // out what it means.
-                return 0;
+                // The number is a signaling NAN, possibly with payload.
+                // Just return the number itself.
+                return encoding;
             }
         }
 
-        // Encode and decode the binary representation.  The sign is 0 (number
-        // is nonnegative) or 1 (number is negative).  The biased exponent is
-        // in the range [0,MAX_BIASED_EXPONENT].  The trailing significand is
+        // Encode and decode the binary representation. The sign is 0 (number
+        // is nonnegative) or 1 (number is negative). The biased exponent is
+        // in the range [0,MAX_BIASED_EXPONENT]. The trailing significand is
         // in the range [0,MAX_TRAILING].
         UInt GetSign() const
         {
@@ -370,5 +398,56 @@ namespace gte
     };
 
     using IEEEBinary32 = IEEEBinary<float, uint32_t, 32, 24>;
+    // NUM_ENCODING_BITS = 32
+    // NUM_EXPONENT_BITS = 8
+    // NUM_SIGNIFICAND_BITS = 24
+    // NUM_TRAILING_BITS = 23
+    // EXPONENT_BIAS = 127
+    // MAX_BIASED_EXPONENT = 255
+    // MIN_SUB_EXPONENT = -126
+    // MIN_EXPONENT = -149
+    // SIGN_SHIFT = 31
+    // SIGN_MASK =          0x80000000
+    // NOT_SIGN_MASK =      0x7FFFFFFF
+    // TRAILING_MASK =      0x007FFFFF
+    // EXPONENT_MASK =      0x7F800000
+    // NAN_QUIET_MASK =     0x00400000
+    // NAN_PAYLOAD_MASK =   0x003FFFFF
+    // MAX_TRAILING =       0x007FFFFF
+    // SUP_TRAILING =       0x00800000
+    // POS_ZERO =           0x00000000
+    // NEG_ZERO =           0x80000000
+    // MIN_SUBNORMAL =      0x00000001
+    // MAX_SUBNORMAL =      0x007FFFFF
+    // MIN_NORMAL =         0x00800000
+    // MAX_NORMAL =         0x7F7FFFFF
+    // POS_INFINITY =       0x7F800000
+    // NEG_INFINITY =       0xFF800000
+
     using IEEEBinary64 = IEEEBinary<double, uint64_t, 64, 53>;
+    // NUM_ENCODING_BITS = 64
+    // NUM_EXPONENT_BITS = 11
+    // NUM_SIGNIFICAND_BITS = 53
+    // NUM_TRAILING_BITS = 52
+    // EXPONENT_BIAS = 1023
+    // MAX_BIASED_EXPONENT = 2047
+    // MIN_SUB_EXPONENT = -1022
+    // MIN_EXPONENT = -1074
+    // SIGN_SHIFT = 63
+    // SIGN_MASK =          0x8000000000000000
+    // NOT_SIGN_MASK =      0x7FFFFFFFFFFFFFFF
+    // TRAILING_MASK =      0x000FFFFFFFFFFFFF
+    // EXPONENT_MASK =      0x7FF0000000000000
+    // NAN_QUIET_MASK =     0x0008000000000000
+    // NAN_PAYLOAD_MASK =   0x0007FFFFFFFFFFFF
+    // MAX_TRAILING =       0x000FFFFFFFFFFFFF
+    // SUP_TRAILING =       0x0010000000000000
+    // POS_ZERO =           0x0000000000000000
+    // NEG_ZERO =           0x8000000000000000
+    // MIN_SUBNORMAL =      0x0000000000000001
+    // MAX_SUBNORMAL =      0x000FFFFFFFFFFFFF
+    // MIN_NORMAL =         0x0010000000000000
+    // MAX_NORMAL =         0x7FEFFFFFFFFFFFFF
+    // POS_INFINITY =       0x7FF0000000000000
+    // NEG_INFINITY =       0xFFF0000000000000
 }

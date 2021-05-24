@@ -1,9 +1,9 @@
 // David Eberly, Geometric Tools, Redmond WA 98052
-// Copyright (c) 1998-2020
+// Copyright (c) 1998-2021
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// Version: 4.0.2019.08.13
+// Version: 4.0.2020.01.13
 
 #pragma once
 
@@ -27,7 +27,7 @@
 // minimum of E.  The algorithm is referred to as Gauss-Newton iteration.  If
 // E does not decrease for a step of the algorithm, one can modify the
 // algorithm to the Levenberg-Marquardt iteration.  See
-// GteLevenbergMarquardtMinimizer.h for a description and an implementation.
+// LevenbergMarquardtMinimizer.h for a description and an implementation.
 //
 // For a single Gauss-Newton iteration, we need to choose d to minimize
 // |F(p) + J(p)d|^2 where p is fixed.  This is a linear least squares problem

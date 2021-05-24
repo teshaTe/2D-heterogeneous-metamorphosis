@@ -1,9 +1,9 @@
 // David Eberly, Geometric Tools, Redmond WA 98052
-// Copyright (c) 1998-2020
+// Copyright (c) 1998-2021
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// Version: 4.0.2019.08.13
+// Version: 4.0.2020.09.01
 
 #pragma once
 
@@ -66,7 +66,7 @@ namespace gte
             mHull.clear();
 
             // Get the convex hull of the points.
-            ConvexHull2<InputType, ComputeType> ch2;
+            ConvexHull2<InputType> ch2;
             ch2(mNumPoints, mPoints, (InputType)0);
             int dimension = ch2.GetDimension();
 
@@ -123,11 +123,14 @@ namespace gte
             }
 
             mHull = ch2.GetHull();
-            Vector2<ComputeType> const* queryPoints = ch2.GetQuery().GetVertices();
+            Vector2<InputType> const* vertices = ch2.GetPoints();
             std::vector<Vector2<ComputeType>> computePoints(mHull.size());
             for (size_t i = 0; i < mHull.size(); ++i)
             {
-                computePoints[i] = queryPoints[mHull[i]];
+                for (int j = 0; j < 2; ++j)
+                {
+                    computePoints[i][j] = vertices[mHull[i]][j];
+                }
             }
 
             RemoveCollinearPoints(computePoints);

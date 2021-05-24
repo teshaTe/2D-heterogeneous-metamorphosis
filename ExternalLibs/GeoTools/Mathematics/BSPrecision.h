@@ -1,9 +1,9 @@
 // David Eberly, Geometric Tools, Redmond WA 98052
-// Copyright (c) 1998-2020
+// Copyright (c) 1998-2021
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// Version: 4.0.2019.09.25
+// Version: 4.0.2020.08.22
 
 #pragma once
 
@@ -169,8 +169,11 @@ namespace gte
         result.bsn.maxWords = result.bsn.GetMaxWords();
 
         // Multiplication is (n0/d0) * (n1/d1) = (n0 * n1) / (d0 * d1). The
-        // parameters are the same as for bsn.
-        result.bsr = result.bsn;
+        // parameters are the same as for numerator/denominator.
+        result.bsr.minExponent = bsp0.bsr.minExponent + bsp1.bsr.minExponent;
+        result.bsr.maxExponent = bsp0.bsr.maxExponent + bsp1.bsr.maxExponent + 1;
+        result.bsr.maxBits = bsp0.bsr.maxBits + bsp1.bsr.maxBits;
+        result.bsr.maxWords = result.bsr.GetMaxWords();
 
         return result;
     }

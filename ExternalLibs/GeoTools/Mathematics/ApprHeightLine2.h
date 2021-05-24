@@ -1,5 +1,5 @@
 // David Eberly, Geometric Tools, Redmond WA 98052
-// Copyright (c) 1998-2020
+// Copyright (c) 1998-2021
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
@@ -8,7 +8,7 @@
 #pragma once
 
 #include <Mathematics/ApprQuery.h>
-#include <Mathematics/Matrix2x2.h>
+#include <Mathematics/Vector2.h>
 
 // Least-squares fit of a line to height data (x,f(x)). The line is of the
 // form: (y - yAvr) = a*(x - xAvr), where (xAvr,yAvr) is the average of the

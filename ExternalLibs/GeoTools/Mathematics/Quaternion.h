@@ -1,9 +1,9 @@
 // David Eberly, Geometric Tools, Redmond WA 98052
-// Copyright (c) 1998-2020
+// Copyright (c) 1998-2021
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// Version: 4.0.2019.08.13
+// Version: 4.0.2020.04.23
 
 #pragma once
 
@@ -312,13 +312,39 @@ namespace gte
         return Quaternion<Real>(-q[0], -q[1], -q[2], +q[3]);
     }
 
-    // Rotate a vector using quaternion multiplication.  The input quaternion
-    // must be unit length.
+    // Rotate a 3D vector v = (v0,v1,v2) using quaternion multiplication. The
+    // input quaternion must be unit length. If R is the rotation matrix
+    // corresponding to the quaternion q, the rotated vector u corresponding
+    // to v is u = R*v when GTE_USE_MAT_VEC is defined (the default for
+    // projects) or u = v*R when GTE_USE_MAT_VEC is not defined.
+    template <typename Real>
+    Vector<3, Real> Rotate(Quaternion<Real> const& q, Vector<3, Real> const& v)
+    {
+        Quaternion<Real> input(v[0], v[1], v[2], (Real)0);
+#if defined(GTE_USE_MAT_VEC)
+        Quaternion<Real> output = q * input * Conjugate(q);
+#else
+        Quaternion<Real> output = Conjugate(q) * input * q;
+#endif
+        Vector<3, Real> u{ output[0], output[1], output[2] };
+        return u;
+    }
+
+    // Rotate a 3D vector, represented as a homogeneous 4D vector
+    // v = (v0,v1,v2,0), using quaternion multiplication. The input quaternion
+    // must be unit length. If R is the rotation matrix corresponding to the
+    // quaternion q, the rotated vector u corresponding to v is u = R*v when
+    // GTE_USE_MAT_VEC is defined (the default for projects) or u = v*R when
+    // GTE_USE_MAT_VEC is not defined.
     template <typename Real>
     Vector<4, Real> Rotate(Quaternion<Real> const& q, Vector<4, Real> const& v)
     {
         Quaternion<Real> input(v[0], v[1], v[2], (Real)0);
+#if defined(GTE_USE_MAT_VEC)
         Quaternion<Real> output = q * input * Conjugate(q);
+#else
+        Quaternion<Real> output = Conjugate(q) * input * q;
+#endif
         Vector<4, Real> u{ output[0], output[1], output[2], (Real)0 };
         return u;
     }

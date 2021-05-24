@@ -1,9 +1,9 @@
 // David Eberly, Geometric Tools, Redmond WA 98052
-// Copyright (c) 1998-2020
+// Copyright (c) 1998-2021
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// Version: 4.0.2019.09.11
+// Version: 4.0.2020.11.16
 
 #pragma once
 
@@ -19,10 +19,18 @@
 // number of 32-bit words required to store the precision for the desired
 // computations (maximum number of bits is 32*N).
 
-// Uncomment this to trap when an attempt is made to create storage with
-// more than N uint32_t items.
+// Uncomment this to collect statistics on how large the UIntegerFP32 storage
+// becomes when using it for the UInteger of BSNumber.  If you use this
+// feature, you must define gsUIntegerFP32MaxSize somewhere in your code.
 //
-//#define GTE_THROW_ON_UINTEGERFP32_OUT_OF_RANGE
+//#define GTE_COLLECT_UINTEGERFP32_STATISTICS
+#if defined(GTE_COLLECT_UINTEGERFP32_STATISTICS)
+#include <Mathematics/AtomicMinMax.h>
+namespace gte
+{
+    extern std::atomic<int32_t> gsUIntegerFP32MaxSize;
+}
+#endif
 
 namespace gte
 {
@@ -63,6 +71,10 @@ namespace gte
                 mNumBits = 0;
                 mSize = 0;
             }
+
+#if defined(GTE_COLLECT_UINTEGERFP32_STATISTICS)
+            AtomicMax(gsUIntegerFP32MaxSize, mSize);
+#endif
         }
 
         UIntegerFP32(uint64_t number)
@@ -87,6 +99,10 @@ namespace gte
                 mNumBits = 0;
                 mSize = 0;
             }
+
+#if defined(GTE_COLLECT_UINTEGERFP32_STATISTICS)
+            AtomicMax(gsUIntegerFP32MaxSize, mSize);
+#endif
         }
 
         // Assignment.  Only mSize elements are copied.
@@ -107,12 +123,12 @@ namespace gte
         // to move everything.  Therefore, the move operator only copies the
         // bits BUT 'number' is modified as if you have stolen the data
         // (mNumBits and mSize set to zero).
-        UIntegerFP32(UIntegerFP32&& number)
+        UIntegerFP32(UIntegerFP32&& number) noexcept
         {
             *this = std::move(number);
         }
 
-        UIntegerFP32& operator=(UIntegerFP32&& number)
+        UIntegerFP32& operator=(UIntegerFP32&& number) noexcept
         {
             mNumBits = number.mNumBits;
             mSize = number.mSize;
@@ -141,9 +157,10 @@ namespace gte
                 LogError("The number of bits must be nonnegative.");
             }
 
-#if defined(GTE_THROW_ON_UINTEGERFP32_OUT_OF_RANGE)
-            LogAssert(mSize <= N, "N not large enough to store number of bits.");
+#if defined(GTE_COLLECT_UINTEGERFP32_STATISTICS)
+            AtomicMax(gsUIntegerFP32MaxSize, mSize);
 #endif
+            LogAssert(mSize <= N, "N not large enough to store number of bits.");
         }
 
         inline int32_t GetNumBits() const
@@ -184,6 +201,20 @@ namespace gte
         inline void SetAllBitsToZero()
         {
             std::fill(mBits.begin(), mBits.end(), 0u);
+        }
+
+        // Copy from UIntegerFP32<NSource> to UIntegerFP32<N> as long as
+        // NSource <= N.
+        template <int NSource>
+        void CopyFrom(UIntegerFP32<NSource> const& source)
+        {
+            static_assert(NSource <= N,
+                "The source dimension cannot exceed the target dimension.");
+
+            mNumBits = source.GetNumBits();
+            mSize = source.GetSize();
+            auto const& srcBits = source.GetBits();
+            std::copy(srcBits.begin(), srcBits.end(), mBits.begin());
         }
 
         // Disk input/output.  The fstream objects should be created using

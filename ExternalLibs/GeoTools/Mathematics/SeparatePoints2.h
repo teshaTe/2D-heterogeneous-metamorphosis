@@ -1,9 +1,9 @@
 // David Eberly, Geometric Tools, Redmond WA 98052
-// Copyright (c) 1998-2020
+// Copyright (c) 1998-2021
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// Version: 4.0.2019.08.13
+// Version: 4.0.2020.09.01
 
 #pragma once
 
@@ -14,7 +14,6 @@
 // of the point sets, then uses the method of separating axes to determine
 // whether the two convex polygons are disjoint.
 // https://www.geometrictools.com/Documentation/MethodOfSeparatingAxes.pdf
-// The ComputeType is for the ConvexHull2 class.
 
 namespace gte
 {
@@ -30,7 +29,7 @@ namespace gte
             Line2<Real>& separatingLine) const
         {
             // Construct convex hull of point set 0.
-            ConvexHull2<Real, ComputeType> ch0;
+            ConvexHull2<Real> ch0;
             ch0(numPoints0, points0, (Real)0);
             if (ch0.GetDimension() != 2)
             {
@@ -38,7 +37,7 @@ namespace gte
             }
 
             // Construct convex hull of point set 1.
-            ConvexHull2<Real, ComputeType> ch1;
+            ConvexHull2<Real> ch1;
             ch1(numPoints1, points1, (Real)0);
             if (ch1.GetDimension() != 2)
             {

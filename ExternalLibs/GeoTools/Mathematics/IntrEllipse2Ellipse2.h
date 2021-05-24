@@ -1,9 +1,9 @@
 // David Eberly, Geometric Tools, Redmond WA 98052
-// Copyright (c) 1998-2020
+// Copyright (c) 1998-2021
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// Version: 4.0.2019.08.13
+// Version: 4.0.2021.04.13
 
 #pragma once
 
@@ -72,7 +72,17 @@ namespace gte
                 one / (ellipse1.extent[0] * ellipse1.extent[0]), zero,
                 zero, one / (ellipse1.extent[1] * ellipse1.extent[1]) };
 
-            // Compute K2.
+            // Compute K2 = D0^{1/2}*R0^T*(K1-K0). In the GTE code, the
+            // quantity U = R0^T*(K1-K0) is a 2x1 vector which can be computed
+            // in the GTE code by U = Transpose(R0)*(K1-K0). However, to avoid
+            // the creation of the matrix object Transpose(R0), you can use
+            // U^T = V^T*R0 which can be computed in the GTE code by
+            // W = (K1-K0)*R0. The output W is mathematically a 1x2 vector,
+            // but as a Vector<?> object, it is a 2-tuple. You can then
+            // compute K2 = D0Half*W, where the 2-tuple W is now thought of
+            // as a 2x1 vector. See Matrix.h, the operator function
+            // Vector<?> operator*(Vector<?> const&, Matrix<?> const&) which
+            // computes V^T*M for a Vector<?> V and a Matrix<?> M.
             Matrix2x2<Real> D0NegHalf{
                 ellipse0.extent[0], zero,
                 zero, ellipse0.extent[1] };
@@ -292,7 +302,7 @@ namespace gte
             Real rho = std::pow(d0 * d0c0 / (d1 * d1c1), oneThird);
             Real smid = (one + rho) / (d0 + rho * d1);
             Real fmid = F(smid);
-            if (fmid <= zero)
+            if (fmid < zero)
             {
                 // Pass in signs rather than infinities, because the bisector cares
                 // only about the signs.
@@ -506,7 +516,7 @@ namespace gte
             E1.center = ellipse1.center;
             E1.axis = ellipse1.axis;
             E1.extent = ellipse1.extent;
-            E1.sqrExtent = ellipse1.extent * ellipse0.extent;
+            E1.sqrExtent = ellipse1.extent * ellipse1.extent;
             FinishEllipseInfo(E1);
 
             AreaResult ar;

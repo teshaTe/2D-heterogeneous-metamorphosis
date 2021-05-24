@@ -1,5 +1,5 @@
 // David Eberly, Geometric Tools, Redmond WA 98052
-// Copyright (c) 1998-2020
+// Copyright (c) 1998-2021
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
@@ -79,7 +79,8 @@ namespace gte
                 // The use of 'double' is intentional in case Real is a BSNumber or
                 // BSRational type.  We want the bisections to terminate in a
                 // reasonable amount of time.
-                unsigned int const maxIterations = GTE_C_MAX_BISECTIONS_GENERIC;
+                //unsigned int const maxIterations = GTE_C_MAX_BISECTIONS_GENERIC;
+                unsigned int const maxIterations = 128;
                 Real roots[8], sn, temp;
                 int i, degree, numRoots;
 
@@ -159,7 +160,7 @@ namespace gte
                     info.circle1Closest = circle0.center + delta;
                     Real N0dDelta = Dot(N0, delta);
                     Real lenN0xDelta = Length(Cross(N0, delta));
-                    if (lenN0xDelta > 0)
+                    if (lenN0xDelta > (Real)0)
                     {
                         Real diff = lenN0xDelta - r0;
                         info.sqrDistance = N0dDelta * N0dDelta + diff * diff;

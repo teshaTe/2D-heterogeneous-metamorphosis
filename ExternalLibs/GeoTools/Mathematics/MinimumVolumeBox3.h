@@ -1,1052 +1,626 @@
 // David Eberly, Geometric Tools, Redmond WA 98052
-// Copyright (c) 1998-2020
+// Copyright (c) 1998-2021
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// Version: 4.0.2019.08.13
+// Version: 4.9.2021.04.22
 
 #pragma once
-
+#include <Mathematics/Logger.h>
 #include <Mathematics/ConvexHull3.h>
 #include <Mathematics/MinimumAreaBox2.h>
-#include <thread>
+#include <Mathematics/VETManifoldMesh.h>
+#include <Mathematics/AlignedBox.h>
+#include <Mathematics/UniqueVerticesSimplices.h>
+#include <cstring>
 
-// Compute a minimum-volume oriented box containing the specified points.  The
+// Compute a minimum-volume oriented box containing the specified points. The
 // algorithm is really about computing the minimum-volume box containing the
-// convex hull of the points, so we must compute the convex hull or you must
-// pass an already built hull to the code.
+// convex hull of the points, so you must compute the convex hull or pass an
+// an already built hull to the code. The convex hull is, of course, a convex
+// polyhedron.
 //
-// The minimum-volume oriented box has a face coincident with a hull face
-// or has three mutually orthogonal edges coincident with three hull edges
-// that (of course) are mutually orthogonal.
-//    J.O'Rourke, "Finding minimal enclosing boxes",
-//    Internat. J. Comput. Inform. Sci., 14:183-199, 1985.
-//
-// A detailed description of the algorithm and implementation is found in
-// the documents
+// According to
+//   J.O'Rourke, "Finding minimal enclosing boxes",
+//   Internat. J. Comput. Inform. Sci., 14:183-199, 1985.
+// the minimum-volume oriented box must have at least two adjacent faces
+// flush with edges of the convex polyhedron. The implementation processes
+// all pairs of edges, determining for each pair the relevant box-face
+// normals that are candidates for the minimum-volume box. I use an approach
+// different from that of the details of proof in the paper; see
 //   https://www.geometrictools.com/Documentation/MinimumVolumeBox.pdf
-//   https://www.geometrictools.com/Documentation/MinimumAreaRectangle.pdf
-//
-// NOTE: This algorithm guarantees a correct output only when ComputeType is
-// an exact arithmetic type that supports division.  In GTEngine, one such
-// type is BSRational<UIntegerAP32> (arbitrary precision).  Another such type
-// is BSRational<UIntegerFP32<N>> (fixed precision), where N is chosen large
-// enough for your input data sets.  If you choose ComputeType to be 'float'
-// or 'double', the output is not guaranteed to be correct.
-//
-// See GeometricTools/GTEngine/Samples/Geometrics/MinimumVolumeBox3 for an
-// example of how to use the code.
+// The computations involve an iterative minimizer, so you cannot expect
+// to obtain the exact minimum-volume box, but you will obtain a good
+// approximation to it based on how many samples the minimizer uses in its
+// search. You can also derive from a class and override the virtual
+// functions that are used for minimization in order to provided your own
+// minimizer algorithm.
 
 namespace gte
 {
-    template <typename InputType, typename ComputeType>
+    // The InputType is 'float' or 'double'. The ComputeType is 'double' when
+    // computeDouble is 'true' or it is the appropriate fixed-precision
+    // BSNumber<> class when computeDouble is 'false'. If you use rational
+    // arithmetic for the computations, you must increase the default program
+    // stack size significantly. In Microsoft Visual Studio, I set the Stack
+    // Reserve Size to 1 GB (which is 1073741824 bytes and is probably much
+    // more than required.).
+    template <typename InputType, bool computeDouble>
     class MinimumVolumeBox3
     {
     public:
-        // The class is a functor to support computing the minimum-volume box
-        // of multiple data sets using the same class object.  For
-        // multithreading in ProcessFaces, choose 'numThreads' subject to the
-        // constraints
-        //     1 <= numThreads <= std::thread::hardware_concurrency()
-        // To execute ProcessEdges in a thread separate from the main thread,
-        // choose 'threadProcessEdges' to 'true'.
-        MinimumVolumeBox3(unsigned int numThreads = 1, bool threadProcessEdges = false)
+        // Supporting constants and types for numerical computing.
+        static int constexpr NumWords = std::is_same<InputType, float>::value ? 342 : 2561;
+        using UIntegerType = UIntegerFP32<NumWords>;
+        using ComputeType = typename std::conditional<computeDouble, double, BSNumber<UIntegerType>>::type;
+        using RationalType = typename std::conditional<computeDouble, double, BSRational<UIntegerType>>::type;
+        using VCompute3 = Vector3<ComputeType>;
+        using RVCompute3 = Vector3<RationalType>;
+
+        // Supporting constants types for a compact vertex-edge-triangle mesh
+        // that represents the convex polyhedron input.
+        static size_t constexpr invalidIndex = std::numeric_limits<size_t>::max();
+
+        struct Edge
+        {
+            Edge()
+                :
+                V{ invalidIndex, invalidIndex },
+                T{ invalidIndex, invalidIndex }
+            {
+            }
+            std::array<size_t, 2> V;
+            std::array<size_t, 2> T;
+        };
+
+        struct Triangle
+        {
+            Triangle()
+                :
+                V{ invalidIndex, invalidIndex },
+                E{ invalidIndex, invalidIndex },
+                T{ invalidIndex, invalidIndex }
+            {
+            }
+
+            std::array<size_t, 3> V;
+            std::array<size_t, 3> E;
+            std::array<size_t, 3> T;
+        };
+
+        // Information about candidates for the minimum-volume box and about
+        // that box itself.
+        struct Candidate
+        {
+            Candidate()
+                :
+                edgeIndex{ invalidIndex, invalidIndex },
+                edge{},
+                N{ VCompute3::Zero(), VCompute3::Zero() },
+                M{ VCompute3::Zero(), VCompute3::Zero() },
+                f00(static_cast<ComputeType>(0)),
+                f10(static_cast<ComputeType>(0)),
+                f01(static_cast<ComputeType>(0)),
+                f11(static_cast<ComputeType>(0)),
+                levelCurveProcessorIndex(invalidIndex),
+                axis{ VCompute3::Unit(0), VCompute3::Unit(1), VCompute3::Unit(2) },
+                minSupportIndex{ invalidIndex, invalidIndex, invalidIndex },
+                maxSupportIndex{ invalidIndex, invalidIndex, invalidIndex },
+                volume(static_cast<ComputeType>(0))
+            {
+            }
+
+            // Set by ProcessEdgePair.
+            std::array<size_t, 2> edgeIndex;
+            std::array<Edge, 2> edge;
+            std::array<VCompute3, 2> N, M;
+            ComputeType f00, f10, f01, f11;
+            size_t levelCurveProcessorIndex;
+
+            // Set by Pair, MinimizerConstantT, MinimizerConstantS,
+            // MinimizerVariableS and MinimizerVariableT. The axis[0] and
+            // axis[1] are set by the aforementioned functions. The axis[2]
+            // is computed by ComputeVolume.
+            std::array<VCompute3, 3> axis;
+
+            // Set by ComputeVolume.
+            std::array<size_t, 3> minSupportIndex;
+            std::array<size_t, 3> maxSupportIndex;
+            RationalType volume;
+        };
+
+        // The rational representation of the minimum-volume box. The axis[]
+        // vectors are generally not unit length. To obtain a unit-length
+        // vector, use axis[i]/std::sqrt(sqrLengthAxis[i]).
+        struct RBox
+        {
+            RBox()
+                :
+                center(RVCompute3::Zero()),
+                axis{ RVCompute3::Zero(), RVCompute3::Zero(), RVCompute3::Zero() },
+                sqrLengthAxis(RVCompute3::Zero()),
+                volume(static_cast<RationalType>(0))
+            {
+            }
+
+            RVCompute3 center;
+            std::array<RVCompute3, 3> axis;
+            RVCompute3 sqrLengthAxis;
+            RVCompute3 scaledExtent;
+            RationalType volume;
+        };
+
+    public:
+        // Construction and destruction. To execute in the main thread, set
+        // numThreads to 0. To run multithreaded on the CPU, set numThreads
+        // to a positive number.
+        MinimumVolumeBox3(size_t numThreads = 0)
             :
             mNumThreads(numThreads),
-            mThreadProcessEdges(threadProcessEdges),
-            mNumPoints(0),
-            mPoints(nullptr),
-            mComputePoints(nullptr),
-            mUseRotatingCalipers(true),
-            mVolume((InputType)0),
-            mZero(0),
-            mOne(1),
-            mNegOne(-1),
-            mHalf((InputType)0.5)
+            mDomainIndex{},
+            mZero(static_cast<ComputeType>(0)),
+            mOne(static_cast<ComputeType>(1)),
+            mHalf(static_cast<ComputeType>(0.5)),
+            mNumVertices(0),
+            mNumTriangles(0),
+            mAdjacentPool{},
+            mVertexAdjacent{},
+            mEdges{},
+            mTriangles{},
+            mEdgeIndices{},
+            mOrigin{},
+            mVertices{},
+            mNormals{},
+            mAlignedCandidate{},
+            mMinimumVolumeObject{},
+            mLevelCurveProcessor{}
         {
+            static_assert(std::is_floating_point<InputType>::value,
+                "The input type must be 'float' or 'double'.");
+
+            InitializeLevelCurveProcessors();
         }
 
-        // The points are arbitrary, so we must compute the convex hull from
-        // them in order to compute the minimum-area box.  The input
-        // parameters are necessary for using ConvexHull3.
-        OrientedBox3<InputType> operator()(int numPoints, Vector3<InputType> const* points,
-            bool useRotatingCalipers = !std::is_floating_point<ComputeType>::value)
+        virtual ~MinimumVolumeBox3() = default;
+
+        // The class is a wrapper for operator()(*), so there is no need for
+        // copy semantics.
+        MinimumVolumeBox3(MinimumVolumeBox3 const&) = delete;
+        MinimumVolumeBox3& operator=(MinimumVolumeBox3 const&) = delete;
+
+        // The convex hull of the input points is computed. The output
+        // box is determined by the dimension of the hull.
+        //   0D: The hull is a single point. The box has center at that
+        //       point, the axes are the standard Euclidean basis, and the
+        //       extents are all 0.
+        //   1D: The hull is a line segment. The box has center at the
+        //       midpoint of the segment, axis[0] is the segment direction,
+        //       axis[1] and axis[2] are chosen so that the three axes form
+        //       a right-handed orthonormal set, extent[0] is the half-length
+        //       of the segment, and extent[1] and extent[2] are 0.
+        //   2D: The hull is a planar polygon. The box is the minimum-area
+        //       box containing that polygon. The axis[0] and axis[1] are
+        //       the axis directions for the planar box, axis[2] is normal
+        //       to the plane of the polygon, extent[0] and extent[1] are
+        //       the extents of the planar box, and extent[2] is 0.
+        //   3D: The hull is a convex polyhedron. The other operator()(*)
+        //       function is called to compute the minimum-volume box of the
+        //       polyhedron.
+        // If the dimension is 0, 1 or 2, the objects returned by the
+        // GetMinimumVolumeObject() and GetRationalBox() are invalid for this
+        // operator()(*).
+        int operator()(
+            int numPoints,
+            Vector3<InputType> const* points,
+            size_t lgMaxSample,
+            OrientedBox3<InputType>& box,
+            InputType& volume)
         {
-            mNumPoints = numPoints;
-            mPoints = points;
-            mUseRotatingCalipers = useRotatingCalipers;
-            mHull.clear();
-            mUniqueIndices.clear();
+            LogAssert(numPoints > 0 && points != nullptr && lgMaxSample >= 2,
+                "Invalid argument.");
 
-            // Get the convex hull of the points.
-            ConvexHull3<InputType, ComputeType> ch3;
-            ch3(mNumPoints, mPoints, (InputType)0);
-            int dimension = ch3.GetDimension();
+            InputType const zero = static_cast<InputType>(0);
+            InputType const one = static_cast<InputType>(1);
+            InputType const half = static_cast<InputType>(0.5);
 
-            OrientedBox3<InputType> itMinBox;
+            ConvexHull3<InputType> ch3;
+            ch3(static_cast<size_t>(numPoints), points, 0);
+            size_t dimension = ch3.GetDimension();
+            auto const& hull = ch3.GetHull();
 
             if (dimension == 0)
             {
-                // The points are all effectively the same (using fuzzy
-                // epsilon).
-                itMinBox.center = mPoints[0];
-                itMinBox.axis[0] = Vector3<InputType>::Unit(0);
-                itMinBox.axis[1] = Vector3<InputType>::Unit(1);
-                itMinBox.axis[2] = Vector3<InputType>::Unit(2);
-                itMinBox.extent[0] = (InputType)0;
-                itMinBox.extent[1] = (InputType)0;
-                itMinBox.extent[2] = (InputType)0;
-                mHull.resize(1);
-                mHull[0] = 0;
-                return itMinBox;
+                // The points are all the same.
+                box.center = points[hull[0]];
+                box.axis[0] = { one, zero, zero };
+                box.axis[1] = { zero, one, zero };
+                box.axis[2] = { zero, zero, one };
+                box.extent[0] = zero;
+                box.extent[1] = zero;
+                box.extent[2] = zero;
+                volume = zero;
+                return 0;
             }
 
             if (dimension == 1)
             {
-                // The points effectively lie on a line (using fuzzy epsilon).
-                // Determine the extreme t-values for the points represented
-                // as P = origin + t*direction.  We know that 'origin' is an
-                // input vertex, so we can start both t-extremes at zero.
-                Line3<InputType> const& line = ch3.GetLine();
-                InputType tmin = (InputType)0, tmax = (InputType)0;
-                int imin = 0, imax = 0;
-                for (int i = 0; i < mNumPoints; ++i)
-                {
-                    Vector3<InputType> diff = mPoints[i] - line.origin;
-                    InputType t = Dot(diff, line.direction);
-                    if (t > tmax)
-                    {
-                        tmax = t;
-                        imax = i;
-                    }
-                    else if (t < tmin)
-                    {
-                        tmin = t;
-                        imin = i;
-                    }
-                }
-
-                itMinBox.center = line.origin + ((InputType)0.5) * (tmin + tmax) * line.direction;
-                itMinBox.extent[0] = ((InputType)0.5) * (tmax - tmin);
-                itMinBox.extent[1] = (InputType)0;
-                itMinBox.extent[2] = (InputType)0;
-                itMinBox.axis[0] = line.direction;
-                ComputeOrthogonalComplement(1, &itMinBox.axis[0]);
-                mHull.resize(2);
-                mHull[0] = imin;
-                mHull[1] = imax;
-                return itMinBox;
+                // The points lie on a line.
+                Vector3<InputType> direction = points[hull[1]] - points[hull[0]];
+                box.center = half * (points[hull[0]] + points[hull[1]]);
+                box.extent[0] = half * Normalize(direction);
+                box.extent[1] = zero;
+                box.extent[2] = zero;
+                box.axis[0] = direction;
+                ComputeOrthogonalComplement(1, &box.axis[0]);
+                volume = zero;
+                return 1;
             }
 
             if (dimension == 2)
             {
-                // The points effectively line on a plane (using fuzzy
-                // epsilon).  Project the points onto the plane and compute
-                // the minimum-area bounding box of them.
-                Plane3<InputType> const& plane = ch3.GetPlane();
+                // The points line on a plane. Get a coordinate system
+                // relative to the plane of the points. Choose the origin
+                // to be any of the input points.
+                Vector3<InputType> origin = points[hull[0]];
+                Vector3<InputType> normal = Vector3<InputType>::Zero();
+                size_t numHull = hull.size();
+                for (size_t i0 = numHull - 1, i1 = 1; i1 < numHull; i0 = i1++)
+                {
+                    auto const& P0 = points[hull[i0]];
+                    auto const& P1 = points[hull[i1]];
+                    normal += Cross(P0, P1);
+                }
 
-                // Get a coordinate system relative to the plane of the
-                // points.  Choose the origin to be any of the input points.
-                Vector3<InputType> origin = mPoints[0];
                 Vector3<InputType> basis[3];
-                basis[0] = plane.normal;
+                basis[0] = normal;
                 ComputeOrthogonalComplement(1, basis);
 
                 // Project the input points onto the plane.
-                std::vector<Vector2<InputType>> projection(mNumPoints);
-                for (int i = 0; i < mNumPoints; ++i)
+                std::vector<Vector2<InputType>> projection(numPoints);
+                for (int i = 0; i < numPoints; ++i)
                 {
-                    Vector3<InputType> diff = mPoints[i] - origin;
+                    Vector3<InputType> diff = points[i] - origin;
                     projection[i][0] = Dot(basis[1], diff);
                     projection[i][1] = Dot(basis[2], diff);
                 }
 
                 // Compute the minimum area box in 2D.
-                MinimumAreaBox2<InputType, ComputeType> mab2;
-                OrientedBox2<InputType> rectangle = mab2(mNumPoints, &projection[0]);
+                MinimumAreaBox2<InputType, BSRational<UIntegerAP32>> mab2;
+                OrientedBox2<InputType> rectangle = mab2(numPoints, &projection[0]);
 
                 // Lift the values into 3D.
-                itMinBox.center = origin + rectangle.center[0] * basis[1] + rectangle.center[1] * basis[2];
-                itMinBox.axis[0] = rectangle.axis[0][0] * basis[1] + rectangle.axis[0][1] * basis[2];
-                itMinBox.axis[1] = rectangle.axis[1][0] * basis[1] + rectangle.axis[1][1] * basis[2];
-                itMinBox.axis[2] = basis[0];
-                itMinBox.extent[0] = rectangle.extent[0];
-                itMinBox.extent[1] = rectangle.extent[1];
-                itMinBox.extent[2] = (InputType)0;
-                mHull = mab2.GetHull();
-                return itMinBox;
+                box.center = origin + rectangle.center[0] * basis[1] + rectangle.center[1] * basis[2];
+                box.axis[0] = rectangle.axis[0][0] * basis[1] + rectangle.axis[0][1] * basis[2];
+                box.axis[1] = rectangle.axis[1][0] * basis[1] + rectangle.axis[1][1] * basis[2];
+                box.axis[2] = basis[0];
+                box.extent[0] = rectangle.extent[0];
+                box.extent[1] = rectangle.extent[1];
+                box.extent[2] = zero;
+                volume = zero;
+                return 2;
             }
 
-            // Get the set of unique indices of the hull.  This is used to
-            // project hull vertices onto lines.
-            ETManifoldMesh const& mesh = ch3.GetHullMesh();
-            mHull.resize(3 * mesh.GetTriangles().size());
-            int h = 0;
-            for (auto const& element : mesh.GetTriangles())
+            // Remove duplicated vertices and reindex them for the convex
+            // polyhedron.
+            std::vector<Vector3<InputType>> inVertices(numPoints);
+            std::memcpy(inVertices.data(), points, inVertices.size() * sizeof(Vector3<InputType>));
+            auto const& triangles = ch3.GetHull();
+            std::vector<int> inIndices(triangles.size());
+            size_t current = 0;
+            for (auto index : triangles)
             {
-                for (int i = 0; i < 3; ++i, ++h)
-                {
-                    int index = element.first.V[i];
-                    mHull[h] = index;
-                    mUniqueIndices.insert(index);
-                }
+                inIndices[current++] = static_cast<int>(index);
             }
 
-            mComputePoints = ch3.GetQuery().GetVertices();
+            UniqueVerticesSimplices<Vector3<InputType>, int, 3> uvt;
+            std::vector<Vector3<InputType>> outVertices;
+            std::vector<int> outIndices;
+            uvt.RemoveDuplicateAndUnusedVertices(inVertices, inIndices,
+                outVertices, outIndices);
 
-            Box minBox, minBoxEdges;
-            minBox.volume = mNegOne;
-            minBoxEdges.volume = mNegOne;
+            operator()(static_cast<int>(outVertices.size()), outVertices.data(),
+                static_cast<int>(outIndices.size()), outIndices.data(),
+                lgMaxSample, box, volume);
 
-            if (mThreadProcessEdges)
-            {
-                std::thread doEdges(
-                    [this, &mesh, &minBoxEdges]()
-                    {
-                        ProcessEdges(mesh, minBoxEdges);
-                    });
-                ProcessFaces(mesh, minBox);
-                doEdges.join();
-            }
-            else
-            {
-                ProcessEdges(mesh, minBoxEdges);
-                ProcessFaces(mesh, minBox);
-            }
-
-            if (minBoxEdges.volume != mNegOne
-                && minBoxEdges.volume < minBox.volume)
-            {
-                minBox = minBoxEdges;
-            }
-
-            ConvertTo(minBox, itMinBox);
-            mComputePoints = nullptr;
-            return itMinBox;
+            return 3;
         }
 
-        // The points form a nondegenerate convex polyhedron.  The indices
-        // input must be nonnull and specify the triangle faces.
-        OrientedBox3<InputType> operator()(int numPoints, Vector3<InputType> const* points,
-            int numIndices, int const* indices,
-            bool useRotatingCalipers = !std::is_floating_point<ComputeType>::value)
+        // The points form a nondegenerate convex polyhedron. The inputs
+        // 'vertices' and 'indices' must be nonempty and the 'vertices' must
+        // have no duplicates. The triangle faces are triples of the indices;
+        // there are indices.size()/3 triangles. Also, 0 <= indices[i] <
+        // vertices.size() for all 0 <= i < indices.size(). The logarithm base
+        // 2 of maximum sample index must satisfy the condition
+        // lgMaxSample >= 2, so there are at least 4 samples. Do not choose it
+        // to be too large when using rational computation because the
+        // computational costs are excessive. You can override the minimizer
+        // functions to use your own minimization algorithm; see the comments
+        // before MinimizerConstantT.
+        void operator()(
+            int numVertices,
+            Vector3<InputType> const* inVertices,
+            int numIndices,
+            int const* inIndices,
+            size_t lgMaxSample,
+            OrientedBox3<InputType>& box,
+            InputType& volume)
         {
-            mNumPoints = numPoints;
-            mPoints = points;
-            mUseRotatingCalipers = useRotatingCalipers;
-            mUniqueIndices.clear();
+            LogAssert(
+                numVertices > 0 && inVertices != nullptr &&
+                numIndices > 0 && inIndices != nullptr &&
+                (numIndices % 3) == 0 && lgMaxSample >= 2,
+                "Invalid argument.");
+                for (int i = 0; i < numIndices; ++i)
+                {
+                    LogAssert(0 <= inIndices[i] && inIndices[i] < numVertices,
+                        "Invalid index.");
+                }
 
-            // Build the mesh from the indices.  The box construction uses the
-            // edge map of the mesh.
-            ETManifoldMesh mesh;
-            int numTriangles = numIndices / 3;
-            for (int t = 0; t < numTriangles; ++t)
+                std::vector<Vector3<InputType>> vertices(numVertices);
+                std::memcpy(vertices.data(), inVertices,
+                    vertices.size() * sizeof(Vector3<InputType>));
+                std::vector<int> indices(numIndices);
+                std::memcpy(indices.data(), inIndices,
+                    indices.size() * sizeof(int));
+
+                GenerateSubdivision(lgMaxSample);
+                CreateCompactMesh(vertices, indices);
+                PrepareVerticesAndNormals(vertices);
+                ComputeAlignedCandidate();
+                GetMinimumVolumeCandidate();
+                GetMinimumVolumeBox(box, volume);
+        }
+
+        // For more information about the minimum-volume box, access the
+        // candidate that stores it.
+        inline Candidate const& GetMinimumVolumeObject() const
+        {
+            return mMinimumVolumeObject;
+        }
+
+        // The operator()(*) function returns a floating-point box and volume.
+        // If you computed using rational arithmetic, the rational box is
+        // accessed by this member function.
+        inline void GetRationalBox(RBox& rbox) const
+        {
+            rbox = mRBox;
+        }
+
+    protected:
+        void CreateDomainIndex(size_t& current, size_t end0, size_t end1)
+        {
+            size_t mid = (end0 + end1) / 2;
+            if (mid != end0 && mid != end1)
             {
-                int v0 = *indices++;
-                int v1 = *indices++;
-                int v2 = *indices++;
+                mDomainIndex[current++] = { mid, end0, end1 };
+                CreateDomainIndex(current, end0, mid);
+                CreateDomainIndex(current, mid, end1);
+            }
+        }
+
+        void GenerateSubdivision(size_t lgMaxSample)
+        {
+            mMaxSample = (static_cast<size_t>(1) << lgMaxSample);
+            mDomainIndex.resize(mMaxSample - 1);
+            size_t current = 0;
+            CreateDomainIndex(current, 0, mMaxSample);
+        }
+
+        // The vertices are stored in a vertex-edge-triangle manifold mesh.
+        // Each vertex as a set of adjacent vertices, a set of adjacent
+        // edges and a set of adjacent triangles. The adjacent vertices are
+        // repackaged into mVertexAdjacent[] and mAdjacentPool[]. For
+        // vertex v with n adjacent vertices, mVertexAdjacent[v] is the
+        // index into mAdjacentPool[] whre the n adjacent vertices are
+        // stored. If the adjacent vertices are a[0] through a[n-1], then
+        // mAdjacentPool[mVertexAdjacent[v] + i] is a[i].
+        void CreateCompactMesh(
+            std::vector<Vector3<InputType>> const& vertices,
+            std::vector<int> const& indices)
+        {
+            mNumVertices = vertices.size();
+            mNumTriangles = indices.size() / 3;
+
+            VETManifoldMesh mesh;
+            int const* current = indices.data();
+            for (size_t t = 0; t < mNumTriangles; ++t)
+            {
+                int v0 = *current++;
+                int v1 = *current++;
+                int v2 = *current++;
                 mesh.Insert(v0, v1, v2);
             }
 
-            // Get the set of unique indices of the hull.  This is used to
-            // project hull vertices onto lines.
-            mHull.resize(3 * mesh.GetTriangles().size());
-            int h = 0;
-            for (auto const& element : mesh.GetTriangles())
+            // It is implicit in the construction of mVertexAdjacent that
+            //   (1) the vertex indices v satisfy 0 <= v < N for a mesh of
+            //       N vertices and
+            //   (2) the vertex map itself is ordered as <0,vertex0>,
+            //       <1,vertex1>, ..., <N-1,vertexNm1>.
+            // Condition (1) is guaranteed because the input to the MVB3
+            // constructor uses the contiguous indices of the position array.
+            // Condition (2) is not guaranteed because VETManifoldMesh::VMap
+            // is a std::unordered_map. The vertices must be sorted here to
+            // satisfy condition2.
+            auto const& vmap = mesh.GetVertices();
+            std::map<int, VETManifoldMesh::Vertex*> sortedVMap;
+            for (auto const& element : vmap)
             {
-                for (int i = 0; i < 3; ++i, ++h)
+                sortedVMap.emplace(element.first, element.second.get());
+            }
+
+            size_t numAdjacentPool = 0;
+            for (auto const& element : sortedVMap)
+            {
+                numAdjacentPool += element.second->VAdjacent.size() + 1;
+            }
+            mAdjacentPool.resize(numAdjacentPool);
+            mVertexAdjacent.resize(sortedVMap.size());
+            size_t apIndex = 0, vaIndex = 0;
+            for (auto const& element : sortedVMap)
+            {
+                auto const& adjacent = element.second->VAdjacent;
+                mVertexAdjacent[vaIndex++] = apIndex;
+                mAdjacentPool[apIndex++] = adjacent.size();
+                for (auto v : adjacent)
                 {
-                    int index = element.first.V[i];
-                    mHull[h] = index;
-                    mUniqueIndices.insert(index);
+                    mAdjacentPool[apIndex++] = static_cast<size_t>(v);
                 }
             }
 
-            // Create the ComputeType points to be used downstream.
-            std::vector<Vector3<ComputeType>> computePoints(mNumPoints);
-            for (auto i : mUniqueIndices)
-            {
-                for (int j = 0; j < 3; ++j)
-                {
-                    computePoints[i][j] = (ComputeType)mPoints[i][j];
-                }
-            }
-
-            OrientedBox3<InputType> itMinBox;
-            mComputePoints = &computePoints[0];
-
-            Box minBox, minBoxEdges;
-            minBox.volume = mNegOne;
-            minBoxEdges.volume = mNegOne;
-
-            if (mThreadProcessEdges)
-            {
-                std::thread doEdges(
-                    [this, &mesh, &minBoxEdges]()
-                    {
-                        ProcessEdges(mesh, minBoxEdges);
-                    });
-                ProcessFaces(mesh, minBox);
-                doEdges.join();
-            }
-            else
-            {
-                ProcessEdges(mesh, minBoxEdges);
-                ProcessFaces(mesh, minBox);
-            }
-
-            if (minBoxEdges.volume != mNegOne && minBoxEdges.volume < minBox.volume)
-            {
-                minBox = minBoxEdges;
-            }
-
-            ConvertTo(minBox, itMinBox);
-            mComputePoints = nullptr;
-            return itMinBox;
-        }
-
-        // Member access.
-        inline int GetNumPoints() const
-        {
-            return mNumPoints;
-        }
-
-        inline Vector3<InputType> const* GetPoints() const
-        {
-            return mPoints;
-        }
-
-        inline std::vector<int> const& GetHull() const
-        {
-            return mHull;
-        }
-
-        inline InputType GetVolume() const
-        {
-            return mVolume;
-        }
-
-    private:
-        struct Box
-        {
-            Vector3<ComputeType> P, U[3];
-            ComputeType sqrLenU[3], range[3][2], volume;
-        };
-
-        struct ExtrudeRectangle
-        {
-            Vector3<ComputeType> U[2];
-            std::array<int, 4> index;
-            ComputeType sqrLenU[2], area;
-        };
-
-        // Compute the minimum-volume box relative to each hull face.
-        void ProcessFaces(ETManifoldMesh const& mesh, Box& minBox)
-        {
-            // Get the mesh data structures.
-            auto const& tmap = mesh.GetTriangles();
             auto const& emap = mesh.GetEdges();
+            auto const& tmap = mesh.GetTriangles();
+            mEdges.resize(emap.size());
+            mTriangles.resize(tmap.size());
 
-            // Compute inner-pointing face normals for searching boxes
-            // supported by a face and an extreme vertex.  The indirection in
-            // triNormalMap, using an integer index instead of the
-            // normal/sqrlength pair itself, avoids expensive copies when
-            // using exact arithmetic.
-            std::vector<Vector3<ComputeType>> normal(tmap.size());
-            std::map<std::shared_ptr<Triangle>, int> triNormalMap;
-            int index = 0;
+            std::map<ETManifoldMesh::Edge*, size_t> edgeIndexMap;
+            size_t index = 0;
+            for (auto const& element : emap)
+            {
+                edgeIndexMap.emplace(element.second.get(), index);
+                for (size_t j = 0; j < 2; ++j)
+                {
+                    mEdges[index].V[j] = (size_t)element.second->V[j];
+                }
+                ++index;
+            }
+
+            std::map<ETManifoldMesh::Triangle*, size_t> triangleIndexMap;
+            index = 0;
             for (auto const& element : tmap)
             {
-                auto tri = element.second;
-                Vector3<ComputeType> const& v0 = mComputePoints[tri->V[0]];
-                Vector3<ComputeType> const& v1 = mComputePoints[tri->V[1]];
-                Vector3<ComputeType> const& v2 = mComputePoints[tri->V[2]];
-                Vector3<ComputeType> edge1 = v1 - v0;
-                Vector3<ComputeType> edge2 = v2 - v0;
-                normal[index] = Cross(edge2, edge1);  // inner-pointing normal
-                triNormalMap[tri] = index++;
+                triangleIndexMap.emplace(element.second.get(), index);
+                for (size_t j = 0; j < 3; ++j)
+                {
+                    mTriangles[index].V[j] = (size_t)element.second->V[j];
+                }
+                ++index;
             }
 
-            // Process the triangle faces.  For each face, compute the
-            // polyline of edges that supports the bounding box with a face
-            // coincident to the triangle face.  The projection of the
-            // polyline onto the plane of the triangle face is a convex
-            // polygon, so we can use the method of rotating calipers to
-            // compute its minimum-area box efficiently.
-            unsigned int numFaces = static_cast<unsigned int>(tmap.size());
-            if (mNumThreads > 1 && numFaces >= mNumThreads)
+            index = 0;
+            for (auto const& element : emap)
             {
-                // Repackage the triangle pointers to support the partitioning
-                // of faces for multithreaded face processing.
-                std::vector<std::shared_ptr<Triangle>> triangles;
-                triangles.reserve(numFaces);
-                for (auto const& element : tmap)
+                for (size_t j = 0; j < 2; ++j)
                 {
-                    triangles.push_back(element.second);
+                    auto tri = element.second->T[j];
+                    auto titer = triangleIndexMap.find(tri);
+                    mEdges[index].T[j] = titer->second;
                 }
-
-                // Partition the data for multiple threads.
-                unsigned int numFacesPerThread = numFaces / mNumThreads;
-                std::vector<unsigned int> imin(mNumThreads), imax(mNumThreads);
-                std::vector<Box> localMinBox(mNumThreads);
-                for (unsigned int t = 0; t < mNumThreads; ++t)
-                {
-                    imin[t] = t * numFacesPerThread;
-                    imax[t] = imin[t] + numFacesPerThread - 1;
-                    localMinBox[t].volume = mNegOne;
-                }
-                imax[mNumThreads - 1] = numFaces - 1;
-
-                // Execute the face processing in multiple threads.
-                std::vector<std::thread> process(mNumThreads);
-                for (unsigned int t = 0; t < mNumThreads; ++t)
-                {
-                    process[t] = std::thread([this, t, &imin, &imax, &triangles,
-                        &normal, &triNormalMap, &emap, &localMinBox]()
-                        {
-                            for (unsigned int i = imin[t]; i <= imax[t]; ++i)
-                            {
-                                auto const& supportTri = triangles[i];
-                                ProcessFace(supportTri, normal, triNormalMap, emap, localMinBox[t]);
-                            }
-                        });
-                }
-
-                // Wait for all threads to finish.
-                for (unsigned int t = 0; t < mNumThreads; ++t)
-                {
-                    process[t].join();
-
-                    // Update the minimum-volume box candidate.
-                    if (minBox.volume == mNegOne || localMinBox[t].volume < minBox.volume)
-                    {
-                        minBox = localMinBox[t];
-                    }
-                }
+                ++index;
             }
-            else
+
+            index = 0;
+            for (auto const& element : tmap)
             {
-                for (auto const& element : tmap)
+                for (size_t j = 0; j < 3; ++j)
                 {
-                    auto const& supportTri = element.second;
-                    ProcessFace(supportTri, normal, triNormalMap, emap, minBox);
+                    auto edg = element.second->E[j];
+                    auto eiter = edgeIndexMap.find(edg);
+                    mTriangles[index].E[j] = eiter->second;
+                }
+                for (size_t j = 0; j < 3; ++j)
+                {
+                    auto tri = element.second->T[j];
+                    auto titer = triangleIndexMap.find(tri);
+                    mTriangles[index].T[j] = titer->second;
+                }
+                ++index;
+            }
+
+            size_t const numEdges = mEdges.size();
+            mEdgeIndices.reserve(mEdges.size() * mEdges.size());
+            for (size_t e0 = 0; e0 < numEdges; ++e0)
+            {
+                for (size_t e1 = e0 + 1; e1 < numEdges; ++e1)
+                {
+                    mEdgeIndices.push_back({ e0, e1 });
                 }
             }
         }
 
-        // Compute the minimum-volume box for each triple of orthgonal hull
-        // edges.
-        void ProcessEdges(ETManifoldMesh const& mesh, Box& minBox)
+        template <bool useDouble = computeDouble>
+        typename std::enable_if<useDouble, void>::type
+            ComputeNormal(VCompute3 const& edge0, VCompute3 const& edge1, VCompute3& normal)
         {
-            // The minimum-volume box can also be supported by three mutually
-            // orthogonal edges of the convex hull.  For each triple of
-            // orthogonal edges, compute the minimum-volume box for that
-            // coordinate frame by projecting the points onto the axes of the
-            // frame.  Use a hull vertex as the origin.
-            int index = mesh.GetTriangles().begin()->first.V[0];
-            Vector3<ComputeType> const& origin = mComputePoints[index];
-            Vector3<ComputeType> U[3];
-            std::array<ComputeType, 3> sqrLenU;
+            normal = UnitCross(edge0, edge1);
+        }
 
-            auto const& emap = mesh.GetEdges();
-            auto e2 = emap.begin(), end = emap.end();
-            for (/**/; e2 != end; ++e2)
+        template <bool useDouble = computeDouble>
+        typename std::enable_if<!useDouble, void>::type
+            ComputeNormal(VCompute3 const& edge0, VCompute3 const& edge1, VCompute3& normal)
+        {
+            normal = Cross(edge0, edge1);
+        }
+
+        void PrepareVerticesAndNormals(std::vector<Vector3<InputType>> const& vertices)
+        {
+            // Convert from floating-point type to the compute type (double or
+            // rational). The origin is considered to be inVertices[0]).
+            mVertices.resize(mNumVertices);
+            for (int32_t j = 0; j < 3; ++j)
             {
-                U[2] = mComputePoints[e2->first.V[1]] - mComputePoints[e2->first.V[0]];
-                auto e1 = e2;
-                for (++e1; e1 != end; ++e1)
+                mOrigin[j] = static_cast<ComputeType>(vertices[0][j]);
+                mVertices[0][j] = static_cast<ComputeType>(0);
+            }
+            for (size_t i = 1; i < mNumVertices; ++i)
+            {
+                for (int32_t j = 0; j < 3; ++j)
                 {
-                    U[1] = mComputePoints[e1->first.V[1]] - mComputePoints[e1->first.V[0]];
-                    if (Dot(U[1], U[2]) != mZero)
-                    {
-                        continue;
-                    }
-                    sqrLenU[1] = Dot(U[1], U[1]);
-
-                    auto e0 = e1;
-                    for (++e0; e0 != end; ++e0)
-                    {
-                        U[0] = mComputePoints[e0->first.V[1]] - mComputePoints[e0->first.V[0]];
-                        sqrLenU[0] = Dot(U[0], U[0]);
-                        if (Dot(U[0], U[1]) != mZero || Dot(U[0], U[2]) != mZero)
-                        {
-                            continue;
-                        }
-
-                        // The three edges are mutually orthogonal.  To
-                        // support exact rational arithmetic for volume
-                        // computation, we replace U[2] by a parallel vector.
-                        U[2] = Cross(U[0], U[1]);
-                        sqrLenU[2] = sqrLenU[0] * sqrLenU[1];
-
-                        // Project the vertices onto the lines containing the
-                        // edges.  Use vertex 0 as the origin.
-                        std::array<ComputeType, 3> umin, umax;
-                        for (int j = 0; j < 3; ++j)
-                        {
-                            umin[j] = mZero;
-                            umax[j] = mZero;
-                        }
-
-                        for (auto i : mUniqueIndices)
-                        {
-                            Vector3<ComputeType> diff = mComputePoints[i] - origin;
-                            for (int j = 0; j < 3; ++j)
-                            {
-                                ComputeType dot = Dot(diff, U[j]);
-                                if (dot < umin[j])
-                                {
-                                    umin[j] = dot;
-                                }
-                                else if (dot > umax[j])
-                                {
-                                    umax[j] = dot;
-                                }
-                            }
-                        }
-
-                        ComputeType volume = (umax[0] - umin[0]) / sqrLenU[0];
-                        volume *= (umax[1] - umin[1]) / sqrLenU[1];
-                        volume *= (umax[2] - umin[2]);
-
-                        // Update current minimum-volume box (if necessary).
-                        if (minBox.volume == mOne || volume < minBox.volume)
-                        {
-                            // The edge keys have unordered vertices, so it is
-                            // possible that {U[0],U[1],U[2]} is a left-handed
-                            // set.  We need a right-handed set.
-                            if (DotCross(U[0], U[1], U[2]) < mZero)
-                            {
-                                U[2] = -U[2];
-                            }
-
-                            minBox.P = origin;
-                            for (int j = 0; j < 3; ++j)
-                            {
-                                minBox.U[j] = U[j];
-                                minBox.sqrLenU[j] = sqrLenU[j];
-                                for (int k = 0; k < 3; ++k)
-                                {
-                                    minBox.range[k][0] = umin[k];
-                                    minBox.range[k][1] = umax[k];
-                                }
-                            }
-                            minBox.volume = volume;
-                        }
-                    }
+                    mVertices[i][j] = static_cast<ComputeType>(vertices[i][j]) - mOrigin[j];
                 }
+            }
+
+            // Compute inner-pointing normals that are not required to be
+            // unit length.
+            mNormals.resize(mNumTriangles);
+            for (size_t i = 0; i < mNumTriangles; ++i)
+            {
+                auto const& tri = mTriangles[i];
+                size_t v0 = tri.V[0], v1 = tri.V[1], v2 = tri.V[2];
+                VCompute3 edge10 = mVertices[v1] - mVertices[v0];
+                VCompute3 edge20 = mVertices[v2] - mVertices[v0];
+                ComputeNormal(edge20, edge10, mNormals[i]);
             }
         }
 
-        // Compute the minimum-volume box relative to a single hull face.
-        typedef ETManifoldMesh::Triangle Triangle;
-
-        void ProcessFace(std::shared_ptr<Triangle> const& supportTri,
-            std::vector<Vector3<ComputeType>> const& normal,
-            std::map<std::shared_ptr<Triangle>, int> const& triNormalMap,
-            ETManifoldMesh::EMap const& emap, Box& localMinBox)
+        void ComputeAlignedCandidate()
         {
-            // Get the supporting triangle information.
-            Vector3<ComputeType> const& supportNormal = normal[triNormalMap.find(supportTri)->second];
-
-            // Build the polyline of supporting edges.  The pair
-            // (v,polyline[v]) represents an edge directed appropriately
-            // (see next set of comments).
-            std::vector<int> polyline(mNumPoints);
-            int polylineStart = -1;
-            for (auto const& edgeElement : emap)
+            VCompute3 pmin, pmax;
+            for (int32_t j = 0; j < 3; ++j)
             {
-                auto const& edge = *edgeElement.second;
-                auto const& tri0 = edge.T[0].lock();
-                auto const& tri1 = edge.T[1].lock();
-                auto const& normal0 = normal[triNormalMap.find(tri0)->second];
-                auto const& normal1 = normal[triNormalMap.find(tri1)->second];
-                ComputeType dot0 = Dot(supportNormal, normal0);
-                ComputeType dot1 = Dot(supportNormal, normal1);
-
-                std::shared_ptr<Triangle> tri;
-                if (dot0 < mZero && dot1 >= mZero)
-                {
-                    tri = tri0;
-                }
-                else if (dot1 < mZero && dot0 >= mZero)
-                {
-                    tri = tri1;
-                }
-
-                if (tri)
-                {
-                    // The edge supports the bounding box.  Insert the edge
-                    // in the list using clockwise order relative to tri.
-                    // This will lead to a polyline whose projection onto the
-                    // plane of the hull face is a convex polygon that is
-                    // counterclockwise oriented.
-                    for (int j0 = 2, j1 = 0; j1 < 3; j0 = j1++)
-                    {
-                        if (tri->V[j1] == edge.V[0])
-                        {
-                            if (tri->V[j0] == edge.V[1])
-                            {
-                                polyline[edge.V[1]] = edge.V[0];
-                            }
-                            else
-                            {
-                                polyline[edge.V[0]] = edge.V[1];
-                            }
-                            polylineStart = edge.V[0];
-                            break;
-                        }
-                    }
-                }
+                mAlignedCandidate.maxSupportIndex[j] =
+                    GetExtreme(mAlignedCandidate.axis[j], pmax[j]);
+                mAlignedCandidate.minSupportIndex[j] =
+                    GetExtreme(-mAlignedCandidate.axis[j], pmin[j]);
+                pmin[j] = -pmin[j];
             }
-
-            // Rearrange the edges to form a closed polyline.  For M vertices,
-            // each ComputeBoxFor*() function starts with the edge from
-            // closedPolyline[M-1] to closedPolyline[0].
-            std::vector<int> closedPolyline(mNumPoints);
-            int numClosedPolyline = 0;
-            int v = polylineStart;
-            for (auto& cp : closedPolyline)
-            {
-                cp = v;
-                ++numClosedPolyline;
-                v = polyline[v];
-                if (v == polylineStart)
-                {
-                    break;
-                }
-            }
-            closedPolyline.resize(numClosedPolyline);
-
-            // This avoids redundant face testing in the O(n^2) or O(n)
-            // algorithms, and it simplifies the O(n) implementation.
-            RemoveCollinearPoints(supportNormal, closedPolyline);
-
-            // Compute the box coincident to the hull triangle that has
-            // minimum area on the face coincident with the triangle.
-            Box faceBox;
-            if (mUseRotatingCalipers)
-            {
-                ComputeBoxForFaceOrderN(supportNormal, closedPolyline, faceBox);
-            }
-            else
-            {
-                ComputeBoxForFaceOrderNSqr(supportNormal, closedPolyline, faceBox);
-            }
-
-            // Update the minimum-volume box candidate.
-            if (localMinBox.volume == mNegOne || faceBox.volume < localMinBox.volume)
-            {
-                localMinBox = faceBox;
-            }
+            VCompute3 diff = pmax - pmin;
+            mAlignedCandidate.volume = diff[0] * diff[1] * diff[2];
         }
 
-        // The rotating calipers algorithm has a loop invariant that requires
-        // the convex polygon not to have collinear points.  Any such points
-        // must be removed first.  The code is also executed for the O(n^2)
-        // algorithm to reduce the number of process edges.
-        void RemoveCollinearPoints(Vector3<ComputeType> const& N, std::vector<int>& polyline)
+        size_t GetExtreme(VCompute3 const& direction, ComputeType& dMax)
         {
-            std::vector<int> tmpPolyline = polyline;
-
-            int const numPolyline = static_cast<int>(polyline.size());
-            int numNoncollinear = 0;
-            Vector3<ComputeType> ePrev =
-                mComputePoints[tmpPolyline[0]] - mComputePoints[tmpPolyline.back()];
-
-            for (int i0 = 0, i1 = 1; i0 < numPolyline; ++i0)
+            size_t vMax = 0;
+            dMax = Dot(direction, mVertices[vMax]);
+            for (size_t i = 0; i < mNumVertices; ++i)
             {
-                Vector3<ComputeType> eNext =
-                    mComputePoints[tmpPolyline[i1]] - mComputePoints[tmpPolyline[i0]];
-
-                ComputeType tsp = DotCross(ePrev, eNext, N);
-                if (tsp != mZero)
+                size_t vLocalMax = vMax;
+                ComputeType dLocalMax = dMax;
+                size_t const* adjacent = &mAdjacentPool[mVertexAdjacent[vMax]];
+                size_t numAdjacent = *adjacent++;
+                for (size_t j = 1; j <= numAdjacent; ++j)
                 {
-                    polyline[numNoncollinear++] = tmpPolyline[i0];
-                }
-
-                ePrev = eNext;
-                if (++i1 == numPolyline)
-                {
-                    i1 = 0;
-                }
-            }
-
-            polyline.resize(numNoncollinear);
-        }
-
-        // This is the slow order O(n^2) search.
-        void ComputeBoxForFaceOrderNSqr(Vector3<ComputeType> const& N, std::vector<int> const& polyline, Box& box)
-        {
-            // This code processes the polyline terminator associated with a
-            // convex hull face of inner-pointing normal N.  The polyline is
-            // usually not contained by a plane, and projecting the polyline
-            // to a convex polygon in a plane perpendicular to N introduces
-            // floating-point rounding errors.  The minimum-area box for the
-            // projected polyline is computed indirectly to support exact
-            // rational arithmetic.
-
-            box.P = mComputePoints[polyline[0]];
-            box.U[2] = N;
-            box.sqrLenU[2] = Dot(N, N);
-            box.range[1][0] = mZero;
-            box.volume = mNegOne;
-            int const numPolyline = static_cast<int>(polyline.size());
-            for (int i0 = numPolyline - 1, i1 = 0; i1 < numPolyline; i0 = i1++)
-            {
-                // Create a coordinate system for the plane perpendicular to
-                // the face normal and containing a polyline vertex.
-                Vector3<ComputeType> const& P = mComputePoints[polyline[i0]];
-                Vector3<ComputeType> E = mComputePoints[polyline[i1]] - mComputePoints[polyline[i0]];
-                Vector3<ComputeType> U1 = Cross(N, E);
-                Vector3<ComputeType> U0 = Cross(U1, N);
-
-                // Compute the smallest rectangle containing the projected
-                // polyline.
-                ComputeType min0 = mZero, max0 = mZero, max1 = mZero;
-                for (int j = 0; j < numPolyline; ++j)
-                {
-                    Vector3<ComputeType> diff = mComputePoints[polyline[j]] - P;
-                    ComputeType dot = Dot(U0, diff);
-                    if (dot < min0)
+                    size_t vCandidate = *adjacent++;
+                    ComputeType dCandidate = Dot(direction, mVertices[vCandidate]);
+                    if (dCandidate > dLocalMax)
                     {
-                        min0 = dot;
-                    }
-                    else if (dot > max0)
-                    {
-                        max0 = dot;
-                    }
-
-                    dot = Dot(U1, diff);
-                    if (dot > max1)
-                    {
-                        max1 = dot;
+                        vLocalMax = vCandidate;
+                        dLocalMax = dCandidate;
                     }
                 }
-
-                // The true area is Area(rectangle)*Length(N).  After the
-                // smallest scaled-area rectangle is computed and returned,
-                // the box.volume is updated to be the actual squared volume
-                // of the box.
-                ComputeType sqrLenU1 = Dot(U1, U1);
-                ComputeType volume = (max0 - min0) * max1 / sqrLenU1;
-                if (box.volume == mNegOne || volume < box.volume)
+                if (vMax != vLocalMax)
                 {
-                    box.P = P;
-                    box.U[0] = U0;
-                    box.U[1] = U1;
-                    box.sqrLenU[0] = sqrLenU1 * box.sqrLenU[2];
-                    box.sqrLenU[1] = sqrLenU1;
-                    box.range[0][0] = min0;
-                    box.range[0][1] = max0;
-                    box.range[1][1] = max1;
-                    box.volume = volume;
-                }
-            }
-
-            // Compute the range of points in the support-normal direction.
-            box.range[2][0] = mZero;
-            box.range[2][1] = mZero;
-            for (auto i : mUniqueIndices)
-            {
-                Vector3<ComputeType> diff = mComputePoints[i] - box.P;
-                ComputeType height = Dot(box.U[2], diff);
-                if (height < box.range[2][0])
-                {
-                    box.range[2][0] = height;
-                }
-                else if (height > box.range[2][1])
-                {
-                    box.range[2][1] = height;
-                }
-            }
-
-            // Compute the actual volume.
-            box.volume *= (box.range[2][1] - box.range[2][0]) / box.sqrLenU[2];
-        }
-
-        // This is the rotating calipers version, which is O(n).
-        void ComputeBoxForFaceOrderN(Vector3<ComputeType> const& N, std::vector<int> const& polyline, Box& box)
-        {
-            // This code processes the polyline terminator associated with a
-            // convex hull face of inner-pointing normal N.  The polyline is
-            // usually not contained by a plane, and projecting the polyline
-            // to a convex polygon in a plane perpendicular to N introduces
-            // floating-point rounding errors.  The minimum-area box for the
-            // projected polyline is computed indirectly to support exact
-            // rational arithmetic.
-
-            // When the bounding box corresponding to a polyline edge is
-            // computed, we mark the edge as visited.  If the edge is
-            // encountered later, the algorithm terminates.
-            std::vector<bool> visited(polyline.size());
-            std::fill(visited.begin(), visited.end(), false);
-
-            // Start the minimum-area rectangle search with the edge from the
-            // last polyline vertex to the first.  When updating the extremes,
-            // we want the bottom-most point on the left edge, the top-most
-            // point on the right edge, the left-most point on the top edge,
-            // and the right-most point on the bottom edge.  The polygon edges
-            // starting at these points are then guaranteed not to coincide
-            // with a box edge except when an extreme point is shared by two
-            // box edges (at a corner).
-            ExtrudeRectangle minRct = 
-                SmallestRectangle((int)polyline.size() - 1, 0, N, polyline);
-            visited[minRct.index[0]] = true;
-
-            // Execute the rotating calipers algorithm.
-            ExtrudeRectangle rct = minRct;
-            for (size_t i = 0; i < polyline.size(); ++i)
-            {
-                std::array<std::pair<ComputeType, int>, 4> A;
-                int numA;
-                if (!ComputeAngles(N, polyline, rct, A, numA))
-                {
-                    // The polyline projects to a rectangle, so the search is
-                    // over.
-                    break;
-                }
-
-                // Indirectly sort the A-array.
-                std::array<int, 4> sort = SortAngles(A, numA);
-
-                // Update the supporting indices (rct.index[]) and the
-                // rectangle axis directions (rct.U[]).
-                if (!UpdateSupport(A, numA, sort, N, polyline, visited, rct))
-                {
-                    // We have already processed the rectangle polygon edge,
-                    // so the search is over.
-                    break;
-                }
-
-                if (rct.area < minRct.area)
-                {
-                    minRct = rct;
-                }
-            }
-
-            // Store relevant box information for computing volume and
-            // converting to an InputType bounding box.
-            box.P = mComputePoints[polyline[minRct.index[0]]];
-            box.U[0] = minRct.U[0];
-            box.U[1] = minRct.U[1];
-            box.U[2] = N;
-            box.sqrLenU[0] = minRct.sqrLenU[0];
-            box.sqrLenU[1] = minRct.sqrLenU[1];
-            box.sqrLenU[2] = Dot(box.U[2], box.U[2]);
-
-            // Compute the range of points in the plane perpendicular to the
-            // support normal.
-            box.range[0][0] = Dot(box.U[0], mComputePoints[polyline[minRct.index[3]]] - box.P);
-            box.range[0][1] = Dot(box.U[0], mComputePoints[polyline[minRct.index[1]]] - box.P);
-            box.range[1][0] = mZero;
-            box.range[1][1] = Dot(box.U[1], mComputePoints[polyline[minRct.index[2]]] - box.P);
-
-            // Compute the range of points in the support-normal direction.
-            box.range[2][0] = mZero;
-            box.range[2][1] = mZero;
-            for (auto i : mUniqueIndices)
-            {
-                Vector3<ComputeType> diff = mComputePoints[i] - box.P;
-                ComputeType height = Dot(box.U[2], diff);
-                if (height < box.range[2][0])
-                {
-                    box.range[2][0] = height;
-                }
-                else if (height > box.range[2][1])
-                {
-                    box.range[2][1] = height;
-                }
-            }
-
-            // Compute the actual volume.
-            box.volume =
-                (box.range[0][1] - box.range[0][0]) *
-                ((box.range[1][1] - box.range[1][0]) / box.sqrLenU[1]) *
-                ((box.range[2][1] - box.range[2][0]) / box.sqrLenU[2]);
-        }
-
-        // Compute the smallest rectangle for the polyline edge <V[i0],V[i1]>.
-        ExtrudeRectangle SmallestRectangle(int i0, int i1, Vector3<ComputeType> const& N, std::vector<int> const& polyline)
-        {
-            ExtrudeRectangle rct;
-            Vector3<ComputeType> E = mComputePoints[polyline[i1]] - mComputePoints[polyline[i0]];
-            rct.U[1] = Cross(N, E);
-            rct.U[0] = Cross(rct.U[1], N);
-            rct.index = { i1, i1, i1, i1 };
-            rct.sqrLenU[0] = Dot(rct.U[0], rct.U[0]);
-            rct.sqrLenU[1] = Dot(rct.U[1], rct.U[1]);
-
-            Vector3<ComputeType> const& origin = mComputePoints[polyline[i1]];
-            Vector2<ComputeType> support[4];
-            for (int j = 0; j < 4; ++j)
-            {
-                support[j] = { mZero, mZero };
-            }
-
-            int i = 0;
-            for (auto p : polyline)
-            {
-                Vector3<ComputeType> diff = mComputePoints[p] - origin;
-                Vector2<ComputeType> v = { Dot(rct.U[0], diff), Dot(rct.U[1], diff) };
-
-                // The right-most vertex of the bottom edge is vertices[i1].
-                // The assumption of no triple of collinear vertices
-                // guarantees that box.index[0] is i1, which is the initial
-                // value assigned at the beginning of this function.
-                // Therefore, there is no need to test for other vertices
-                // farther to the right than vertices[i1].
-
-                if (v[0] > support[1][0] ||
-                    (v[0] == support[1][0] && v[1] > support[1][1]))
-                {
-                    // New right maximum OR same right maximum but closer
-                    // to top.
-                    rct.index[1] = i;
-                    support[1] = v;
-                }
-
-                if (v[1] > support[2][1] ||
-                    (v[1] == support[2][1] && v[0] < support[2][0]))
-                {
-                    // New top maximum OR same top maximum but closer
-                    // to left.
-                    rct.index[2] = i;
-                    support[2] = v;
-                }
-
-                if (v[0] < support[3][0] ||
-                    (v[0] == support[3][0] && v[1] < support[3][1]))
-                {
-                    // New left minimum OR same left minimum but closer
-                    // to bottom.
-                    rct.index[3] = i;
-                    support[3] = v;
-                }
-
-                ++i;
-            }
-
-            // The comment in the loop has the implication that
-            // support[0] = { 0, 0 }, so the scaled height
-            // (support[2][1] - support[0][1]) is simply support[2][1].
-            ComputeType scaledWidth = support[1][0] - support[3][0];
-            ComputeType scaledHeight = support[2][1];
-            rct.area = scaledWidth * scaledHeight / rct.sqrLenU[1];
-            return rct;
-        }
-
-        // Compute (sin(angle))^2 for the polyline edges emanating from the
-        // support vertices of the rectangle.  The return value is 'true' if
-        // at least one angle is in [0,pi/2); otherwise, the return value is
-        // 'false' and the original polyline must project to a rectangle.
-        bool ComputeAngles(Vector3<ComputeType> const& N,
-            std::vector<int> const& polyline, ExtrudeRectangle const& rct,
-            std::array<std::pair<ComputeType, int>, 4>& A, int& numA) const
-        {
-            int const numPolyline = static_cast<int>(polyline.size());
-            numA = 0;
-            for (int k0 = 3, k1 = 0; k1 < 4; k0 = k1++)
-            {
-                if (rct.index[k0] != rct.index[k1])
-                {
-                    // The rct edges are ordered in k1 as U[0], U[1],
-                    // -U[0], -U[1].
-                    int lookup = (k0 & 1);
-                    Vector3<ComputeType> D = ((k0 & 2) ? -rct.U[lookup] : rct.U[lookup]);
-                    int j0 = rct.index[k0], j1 = j0 + 1;
-                    if (j1 == numPolyline)
-                    {
-                        j1 = 0;
-                    }
-                    Vector3<ComputeType> E = mComputePoints[polyline[j1]] - mComputePoints[polyline[j0]];
-                    Vector3<ComputeType> Eperp = Cross(N, E);
-                    E = Cross(Eperp, N);
-                    Vector3<ComputeType> DxE = Cross(D, E);
-                    ComputeType csqrlen = Dot(DxE, DxE);
-                    ComputeType dsqrlen = rct.sqrLenU[lookup];
-                    ComputeType esqrlen = Dot(E, E);
-                    ComputeType sinThetaSqr = csqrlen / (dsqrlen * esqrlen);
-                    A[numA++] = std::make_pair(sinThetaSqr, k0);
-                }
-            }
-            return numA > 0;
-        }
-
-        // Sort the angles indirectly.  The sorted indices are returned.  This
-        // avoids swapping elements of A[], which can be expensive when
-        // ComputeType is an exact rational type.
-        std::array<int, 4> SortAngles(std::array<std::pair<ComputeType, int>, 4> const& A, int numA) const
-        {
-            std::array<int, 4> sort = { 0, 1, 2, 3 };
-            if (numA > 1)
-            {
-                if (numA == 2)
-                {
-                    if (A[sort[0]].first > A[sort[1]].first)
-                    {
-                        std::swap(sort[0], sort[1]);
-                    }
-                }
-                else if (numA == 3)
-                {
-                    if (A[sort[0]].first > A[sort[1]].first)
-                    {
-                        std::swap(sort[0], sort[1]);
-                    }
-                    if (A[sort[0]].first > A[sort[2]].first)
-                    {
-                        std::swap(sort[0], sort[2]);
-                    }
-                    if (A[sort[1]].first > A[sort[2]].first)
-                    {
-                        std::swap(sort[1], sort[2]);
-                    }
-                }
-                else  // numA == 4
-                {
-                    if (A[sort[0]].first > A[sort[1]].first)
-                    {
-                        std::swap(sort[0], sort[1]);
-                    }
-                    if (A[sort[2]].first > A[sort[3]].first)
-                    {
-                        std::swap(sort[2], sort[3]);
-                    }
-                    if (A[sort[0]].first > A[sort[2]].first)
-                    {
-                        std::swap(sort[0], sort[2]);
-                    }
-                    if (A[sort[1]].first > A[sort[3]].first)
-                    {
-                        std::swap(sort[1], sort[3]);
-                    }
-                    if (A[sort[1]].first > A[sort[2]].first)
-                    {
-                        std::swap(sort[1], sort[2]);
-                    }
-                }
-            }
-            return sort;
-        }
-
-        bool UpdateSupport(std::array<std::pair<ComputeType, int>, 4> const& A, int numA,
-            std::array<int, 4> const& sort, Vector3<ComputeType> const& N, std::vector<int> const& polyline,
-            std::vector<bool>& visited, ExtrudeRectangle& rct)
-        {
-            // Replace the support vertices of those edges attaining minimum
-            // angle with the other endpoints of the edges.
-            int const numPolyline = static_cast<int>(polyline.size());
-            auto const& amin = A[sort[0]];
-            for (int k = 0; k < numA; ++k)
-            {
-                auto const& a = A[sort[k]];
-                if (a.first == amin.first)
-                {
-                    if (++rct.index[a.second] == numPolyline)
-                    {
-                        rct.index[a.second] = 0;
-                    }
+                    vMax = vLocalMax;
+                    dMax = dLocalMax;
                 }
                 else
                 {
@@ -1054,132 +628,1639 @@ namespace gte
                 }
             }
 
-            int bottom = rct.index[amin.second];
-            if (visited[bottom])
-            {
-                // We have already processed this polyline edge.
-                return false;
-            }
-            visited[bottom] = true;
-
-            // Cycle the vertices so that the bottom support occurs first.
-            std::array<int, 4> nextIndex;
-            for (int k = 0; k < 4; ++k)
-            {
-                nextIndex[k] = rct.index[(amin.second + k) % 4];
-            }
-            rct.index = nextIndex;
-
-            // Compute the rectangle axis directions.
-            int j1 = rct.index[0], j0 = j1 - 1;
-            if (j1 < 0)
-            {
-                j1 = numPolyline - 1;
-            }
-            Vector3<ComputeType> E =
-                mComputePoints[polyline[j1]] - mComputePoints[polyline[j0]];
-            rct.U[1] = Cross(N, E);
-            rct.U[0] = Cross(rct.U[1], N);
-            rct.sqrLenU[0] = Dot(rct.U[0], rct.U[0]);
-            rct.sqrLenU[1] = Dot(rct.U[1], rct.U[1]);
-
-            // Compute the rectangle area.
-            Vector3<ComputeType> diff[2] =
-            {
-                mComputePoints[polyline[rct.index[1]]]
-                    - mComputePoints[polyline[rct.index[3]]],
-                mComputePoints[polyline[rct.index[2]]]
-                    - mComputePoints[polyline[rct.index[0]]]
-            };
-            ComputeType scaledWidth = Dot(rct.U[0], diff[0]);
-            ComputeType scaledHeight = Dot(rct.U[1], diff[1]);
-            rct.area = scaledWidth * scaledHeight / rct.sqrLenU[1];
-            return true;
+            return vMax;
         }
 
-        // Convert the extruded box to the minimum-volume box of InputType.
-        // When the ComputeType is an exact rational type, the conversions are
-        // performed to avoid precision loss until necessary at the last step.
-        void ConvertTo(Box const& minBox, OrientedBox3<InputType>& itMinBox)
+        void ComputeVolume(Candidate& candidate)
         {
-            Vector3<ComputeType> center = minBox.P;
-            for (int i = 0; i < 3; ++i)
-            {
-                ComputeType average = mHalf * (minBox.range[i][0] + minBox.range[i][1]);
-                center += (average / minBox.sqrLenU[i]) * minBox.U[i];
-            }
+            // The last axis is needed only when computing the volume for
+            // comparison to the current candidate volume, so compute this
+            // axis now.
+            candidate.axis[2] = Cross(candidate.axis[0], candidate.axis[1]);
 
-            // Calculate the squared extent using ComputeType to avoid loss of
-            // precision before computing a squared root.
-            Vector3<ComputeType> sqrExtent;
-            for (int i = 0; i < 3; ++i)
-            {
-                sqrExtent[i] = mHalf * (minBox.range[i][1] - minBox.range[i][0]);
-                sqrExtent[i] *= sqrExtent[i];
-                sqrExtent[i] /= minBox.sqrLenU[i];
-            }
-
-            for (int i = 0; i < 3; ++i)
-            {
-                itMinBox.center[i] = (InputType)center[i];
-                itMinBox.extent[i] = std::sqrt((InputType)sqrExtent[i]);
-
-                // Before converting to floating-point, factor out the maximum
-                // component using ComputeType to generate rational numbers in
-                // a range that avoids loss of precision during the conversion
-                // and normalization.
-                Vector3<ComputeType> const& axis = minBox.U[i];
-                ComputeType cmax = std::max(std::fabs(axis[0]), std::fabs(axis[1]));
-                cmax = std::max(cmax, std::fabs(axis[2]));
-                ComputeType invCMax = mOne / cmax;
-                for (int j = 0; j < 3; ++j)
-                {
-                    itMinBox.axis[i][j] = (InputType)(axis[j] * invCMax);
-                }
-                Normalize(itMinBox.axis[i]);
-            }
-
-            mVolume = (InputType)minBox.volume;
+            VCompute3 pmin, pmax;
+            candidate.minSupportIndex[0] = mEdges[candidate.edgeIndex[0]].V[0];
+            pmin[0] = Dot(candidate.axis[0], mVertices[candidate.minSupportIndex[0]]);
+            candidate.maxSupportIndex[0] = GetExtreme(candidate.axis[0], pmax[0]);
+            candidate.minSupportIndex[1] = mEdges[candidate.edgeIndex[1]].V[0];
+            pmin[1] = Dot(candidate.axis[1], mVertices[candidate.minSupportIndex[1]]);
+            candidate.maxSupportIndex[1] = GetExtreme(candidate.axis[1], pmax[1]);
+            candidate.axis[2] = Cross(candidate.axis[0], candidate.axis[1]);
+            candidate.minSupportIndex[2] = GetExtreme(-candidate.axis[2], pmin[2]);
+            pmin[2] = -pmin[2];
+            candidate.maxSupportIndex[2] = GetExtreme(candidate.axis[2], pmax[2]);
+            VCompute3 diff = pmax - pmin;
+            candidate.volume =
+                static_cast<RationalType>(diff[0] * diff[1] * diff[2]) /
+                static_cast<RationalType>(Dot(candidate.axis[2], candidate.axis[2]));
         }
 
-        // The code is multithreaded, both for convex hull computation and
-        // computing minimum-volume extruded boxes for the hull faces.  The
-        // default value is 1, which implies a single-threaded computation (on
-        // the main thread).
-        unsigned int mNumThreads;
-        bool mThreadProcessEdges;
+        void ProcessEdgePair(std::array<size_t, 2> const& edgeIndex, Candidate& mvCandidate)
+        {
+            // Examine the zero-valued level curves for
+            // F(s,t)
+            // = Dot((1-s)*edge0.N0 + s*edge0.N1, (1-t)*edge1.N0 + t*edge1.N1)
+            // = (1-s)*(1-t)*Dot(edge0.N0,edge1.N0)
+            //   + (1-s)*t*Dot(edge0.N0,edge1.N1)
+            //   + s*(1-t)*Dot(edge0.N1,edge1.N0)
+            //   + s*t*Dot(edge0.N1,edge1.N1)
+            // = (1-s)*(1-t)*f00 + (1-s)*t*f01 + s*(1-t)*f10 + s*t*f11
+            // = a00 + a10*s + a01*t + a11*s*t
+            // = [(a00*a11 - a01*a10) + (a01 + a11*s)*(a10 + a11*t)]/a11
+            // where a00 = f00, a10 = f10-f00, a01 = f01-f00 and
+            // a11 = f00-f01-f10+f11.  Let d = a00*a11 - a01*a10 =
+            // f00*f11 - f01*f10. If d = 0, then the level curves are
+            // s = -a01/a11 and t = -a10/a11. If d != 0, then the level curves
+            // are hyperbolic curves with asymptotes s = -a01/a11 and
+            // t = -a10/a11.
 
-        // The input points to be bound.
-        int mNumPoints;
-        Vector3<InputType> const* mPoints;
+            Candidate candidate = mAlignedCandidate;
+            candidate.edgeIndex = edgeIndex;
+            Edge const& edge0 = mEdges[candidate.edgeIndex[0]];
+            Edge const& edge1 = mEdges[candidate.edgeIndex[1]];
+            candidate.edge[0] = edge0;
+            candidate.edge[1] = edge1;
+            candidate.N[0] = mNormals[edge0.T[0]];
+            candidate.N[1] = mNormals[edge0.T[1]];
+            candidate.M[0] = mNormals[edge1.T[0]];
+            candidate.M[1] = mNormals[edge1.T[1]];
+            candidate.f00 = Dot(candidate.N[0], candidate.M[0]);
+            candidate.f10 = Dot(candidate.N[1], candidate.M[0]);
+            candidate.f01 = Dot(candidate.N[0], candidate.M[1]);
+            candidate.f11 = Dot(candidate.N[1], candidate.M[1]);
 
-        // The ComputeType conversions of the input points.  Only points of
-        // the convex hull (vertices of a convex polyhedron) are converted
-        // for performance when ComputeType is rational.
-        Vector3<ComputeType> const* mComputePoints;
+            uint32_t bits00 = (candidate.f00 > mZero ? 1 : (candidate.f00 < mZero ? 2 : 0));
+            uint32_t bits10 = (candidate.f10 > mZero ? 1 : (candidate.f10 < mZero ? 2 : 0));
+            uint32_t bits01 = (candidate.f01 > mZero ? 1 : (candidate.f01 < mZero ? 2 : 0));
+            uint32_t bits11 = (candidate.f11 > mZero ? 1 : (candidate.f11 < mZero ? 2 : 0));
+            uint32_t index = bits00 | (bits10 << 2) | (bits01 << 4) | (bits11 << 6);
+            if (index != 0x55 && index != 0xaa)
+            {
+                candidate.levelCurveProcessorIndex = index;
+                (this->*mLevelCurveProcessor[candidate.levelCurveProcessorIndex])(candidate, mvCandidate);
+            }
+        }
 
-        // The indices into mPoints/mComputePoints for the convex hull
+        void GetMinimumVolumeCandidate()
+        {
+            mMinimumVolumeObject = mAlignedCandidate;
+
+            if (mNumThreads > 0)
+            {
+                size_t const numPairsPerThread = mEdgeIndices.size() / mNumThreads;
+                std::vector<size_t> imin(mNumThreads), imax(mNumThreads);
+                for (size_t t = 0; t < mNumThreads; ++t)
+                {
+                    imin[t] = t * numPairsPerThread;
+                    imax[t] = (t + 1) * numPairsPerThread;
+                }
+                imax.back() = mEdgeIndices.size();
+
+                std::vector<Candidate> candidates(mNumThreads);
+                std::vector<std::thread> process(mNumThreads);
+                for (size_t t = 0; t < mNumThreads; ++t)
+                {
+                    process[t] = std::thread(
+                        [this, t, &imin, &imax, &candidates]()
+                        {
+                            candidates[t] = mAlignedCandidate;
+                            for (size_t i = imin[t]; i < imax[t]; ++i)
+                            {
+                                ProcessEdgePair(mEdgeIndices[i], candidates[t]);
+                            }
+                        });
+                }
+
+                for (size_t t = 0; t < mNumThreads; ++t)
+                {
+                    process[t].join();
+                    if (candidates[t].volume < mMinimumVolumeObject.volume)
+                    {
+                        mMinimumVolumeObject = candidates[t];
+                    }
+                }
+            }
+            else
+            {
+                for (auto const& edgeIndex : mEdgeIndices)
+                {
+                    ProcessEdgePair(edgeIndex, mMinimumVolumeObject);
+                }
+            }
+        }
+
+        void GetMinimumVolumeBox(OrientedBox3<InputType>& box, InputType& volume)
+        {
+            Candidate const& mvc = mMinimumVolumeObject;
+
+            // Compute the rational-valued box and volume.
+            Vector3<RationalType> pmin, pmax;
+            for (int32_t i = 0; i < 3; ++i)
+            {
+                mRBox.center[i] = mOrigin[i];
+
+                for (int32_t j = 0; j < 3; ++j)
+                {
+                    mRBox.axis[i][j] = mvc.axis[i][j];
+                }
+                mRBox.sqrLengthAxis[i] = Dot(mRBox.axis[i], mRBox.axis[i]);
+
+                pmin[i] = static_cast<RationalType>(Dot(mvc.axis[i], mVertices[mvc.minSupportIndex[i]]));
+                pmax[i] = static_cast<RationalType>(Dot(mvc.axis[i], mVertices[mvc.maxSupportIndex[i]]));
+            }
+
+            RationalType const half(0.5);
+            Vector3<RationalType> average = half * (pmax + pmin);
+            for (int32_t i = 0; i < 3; ++i)
+            {
+                for (int32_t j = 0; j < 3; ++j)
+                {
+                    mRBox.center[j] += (average[i] / mRBox.sqrLengthAxis[i]) * mRBox.axis[i][j];
+                }
+            }
+
+            Vector3<RationalType> difference = pmax - pmin;
+            mRBox.scaledExtent = half * difference;
+
+            mRBox.volume = difference[0] * difference[1] * difference[2] / mRBox.sqrLengthAxis[2];
+
+            // Compute the floating-point-valued box and volume.
+            for (int32_t i = 0; i < 3; ++i)
+            {
+                box.center[i] = static_cast<InputType>(mRBox.center[i]);
+                InputType length = static_cast<InputType>(std::sqrt(mRBox.sqrLengthAxis[i]));
+                for (int32_t j = 0; j < 3; ++j)
+                {
+                    box.axis[i][j] = static_cast<InputType>(mRBox.axis[i][j]) / length;
+                }
+                box.extent[i] = static_cast<InputType>(mRBox.scaledExtent[i]) / length;
+            }
+            volume = static_cast<InputType>(mRBox.volume);
+        }
+
+        // The number of threads to use for computing. If 0, the main thread
+        // is used. If positive, std::thread objects are used.
+        size_t mNumThreads;
+
+        // The maximum sample index used to search each level curve for
+        // non-face-supporting boxes (mMaxSample + 1 values). The samples are
+        // visited using subdivision of the domain of the level curve. The
+        // subdivision/ information is stored in mDomainIndex(mNumSamples-1).
+        size_t mMaxSample;
+        std::vector<std::array<size_t, 3>> mDomainIndex;
+
+        // Convenient members to allow construction once when the ComputeType
+        // is BSNumber<*>.
+        ComputeType const mZero, mOne, mHalf;
+
+        // A mesh representation of the convex polyhedron. The mesh is
+        // generated dynamically from the inputs to operator() but then is
+        // converted to a pointerless representation. The mAdjacentPool and
+        // mVertexAdjacent member are used for fast lookup of adjacent
+        // vertices in GetExtreme(*).
+        size_t mNumVertices, mNumTriangles;
+        std::vector<size_t> mAdjacentPool;
+        std::vector<size_t> mVertexAdjacent;
+        std::vector<Edge> mEdges;
+        std::vector<Triangle> mTriangles;
+        std::vector<std::array<size_t, 2>> mEdgeIndices;
+
+        // Storage for translated vertices and normal vectors. If the
+        // compute type is 'double', the normals must be normalized to
+        // unit length (within floating-point rounding error).
+        VCompute3 mOrigin;
+        std::vector<VCompute3> mVertices;
+        std::vector<VCompute3> mNormals;
+
+        // The axis-aligned bounding box of the vertices is used as the
+        // initial candidate for the minimum-volume box.
+        Candidate mAlignedCandidate;
+
+        // The information for the minimum-volume bounding box of the
         // vertices.
-        std::vector<int> mHull;
+        Candidate mMinimumVolumeObject;
+        RBox mRBox;
 
-        // The unique indices in mHull.  This set allows us to compute only
-        // for the hull vertices and avoids redundant computations if the
-        // indices were to have repeated indices into mPoints/mComputePoints.
-        // This is a performance improvement for rational ComputeType.
-        std::set<int> mUniqueIndices;
+        // Each member function A00B10C01D11(*) corresponds to a bilinear
+        // function on the domain [0,1]^2. Each corner of the domain has a
+        // bilinear function value that is positive, negative or zero,
+        // leading to 3^4 = 81 possibilities. The 'A', 'B', 'C' and 'D' are
+        // in {'P', 'M', 'Z'} [for Plus, Minus, Zero].
+        typedef void (MinimumVolumeBox3::* LevelCurveProcessor)(Candidate&, Candidate&);
+        std::array<LevelCurveProcessor, 256> mLevelCurveProcessor;
 
-        // The caller can specify whether to use rotating calipers or the
-        // slower all-edge processing for computing an extruded bounding box.
-        bool mUseRotatingCalipers;
+    protected:
+        // Support for the level-curve processing functions.
+        void InitializeLevelCurveProcessors()
+        {
+            // Generate the initialization code for mLevelCurveProcessor.
+            // To compile the code, include <fstream>, <strstream> and
+            // <iomanip.
+            //
+            // std::ofstream output("LevelCurveProcessor.txt");
+            // std::array<char, 3> signchar = { 'Z', 'P', 'M' };
+            // for (uint32_t index = 0; index < 256u; ++index)
+            // {
+            //     if ((index & 0x00000003u) != 0x00000003u &&
+            //         (index & 0x0000000Cu) != 0x0000000Cu &&
+            //         (index & 0x00000030u) != 0x00000030u &&
+            //         (index & 0x000000C0u) != 0x000000C0u)
+            //     {
+            //         char s00 = signchar[index & 0x00000003u];
+            //         char s10 = signchar[(index & 0x0000000Cu) >> 2];
+            //         char s01 = signchar[(index & 0x00000030u) >> 4];
+            //         char s11 = signchar[(index & 0x000000C0u) >> 6];
+            //         std::strstream ostream;
+            //         ostream << std::hex << std::setfill('0') << std::setw(2);
+            //         ostream
+            //             << "    mLevelCurveProcessor[0x0"
+            //             << std::hex << std::setfill('0') << std::setw(2)
+            //             << index
+            //             << "] = &MinimumVolumeBox3::"
+            //             << s00 << "00"
+            //             << s10 << "10"
+            //             << s01 << "01"
+            //             << s11 << "11;"
+            //             << std::ends;
+            //         output << ostream.str() << std::endl;
+            //     }
+            // }
+            // output.close();
 
-        // The volume of the minimum-volume box.  The ComputeType value is
-        // exact, so the only rounding errors occur in the conversion from
-        // ComputeType to InputType (default rounding mode is
-        // round-to-nearest-ties-to-even).
-        InputType mVolume;
+            mLevelCurveProcessor.fill(nullptr);
+            mLevelCurveProcessor[0x00] = &MinimumVolumeBox3::Z00Z10Z01Z11;
+            mLevelCurveProcessor[0x01] = &MinimumVolumeBox3::P00Z10Z01Z11;
+            mLevelCurveProcessor[0x02] = &MinimumVolumeBox3::M00Z10Z01Z11;
+            mLevelCurveProcessor[0x04] = &MinimumVolumeBox3::Z00P10Z01Z11;
+            mLevelCurveProcessor[0x05] = &MinimumVolumeBox3::P00P10Z01Z11;
+            mLevelCurveProcessor[0x06] = &MinimumVolumeBox3::M00P10Z01Z11;
+            mLevelCurveProcessor[0x08] = &MinimumVolumeBox3::Z00M10Z01Z11;
+            mLevelCurveProcessor[0x09] = &MinimumVolumeBox3::P00M10Z01Z11;
+            mLevelCurveProcessor[0x0a] = &MinimumVolumeBox3::M00M10Z01Z11;
+            mLevelCurveProcessor[0x10] = &MinimumVolumeBox3::Z00Z10P01Z11;
+            mLevelCurveProcessor[0x11] = &MinimumVolumeBox3::P00Z10P01Z11;
+            mLevelCurveProcessor[0x12] = &MinimumVolumeBox3::M00Z10P01Z11;
+            mLevelCurveProcessor[0x14] = &MinimumVolumeBox3::Z00P10P01Z11;
+            mLevelCurveProcessor[0x15] = &MinimumVolumeBox3::P00P10P01Z11;
+            mLevelCurveProcessor[0x16] = &MinimumVolumeBox3::M00P10P01Z11;
+            mLevelCurveProcessor[0x18] = &MinimumVolumeBox3::Z00M10P01Z11;
+            mLevelCurveProcessor[0x19] = &MinimumVolumeBox3::P00M10P01Z11;
+            mLevelCurveProcessor[0x1a] = &MinimumVolumeBox3::M00M10P01Z11;
+            mLevelCurveProcessor[0x20] = &MinimumVolumeBox3::Z00Z10M01Z11;
+            mLevelCurveProcessor[0x21] = &MinimumVolumeBox3::P00Z10M01Z11;
+            mLevelCurveProcessor[0x22] = &MinimumVolumeBox3::M00Z10M01Z11;
+            mLevelCurveProcessor[0x24] = &MinimumVolumeBox3::Z00P10M01Z11;
+            mLevelCurveProcessor[0x25] = &MinimumVolumeBox3::P00P10M01Z11;
+            mLevelCurveProcessor[0x26] = &MinimumVolumeBox3::M00P10M01Z11;
+            mLevelCurveProcessor[0x28] = &MinimumVolumeBox3::Z00M10M01Z11;
+            mLevelCurveProcessor[0x29] = &MinimumVolumeBox3::P00M10M01Z11;
+            mLevelCurveProcessor[0x2a] = &MinimumVolumeBox3::M00M10M01Z11;
+            mLevelCurveProcessor[0x40] = &MinimumVolumeBox3::Z00Z10Z01P11;
+            mLevelCurveProcessor[0x41] = &MinimumVolumeBox3::P00Z10Z01P11;
+            mLevelCurveProcessor[0x42] = &MinimumVolumeBox3::M00Z10Z01P11;
+            mLevelCurveProcessor[0x44] = &MinimumVolumeBox3::Z00P10Z01P11;
+            mLevelCurveProcessor[0x45] = &MinimumVolumeBox3::P00P10Z01P11;
+            mLevelCurveProcessor[0x46] = &MinimumVolumeBox3::M00P10Z01P11;
+            mLevelCurveProcessor[0x48] = &MinimumVolumeBox3::Z00M10Z01P11;
+            mLevelCurveProcessor[0x49] = &MinimumVolumeBox3::P00M10Z01P11;
+            mLevelCurveProcessor[0x4a] = &MinimumVolumeBox3::M00M10Z01P11;
+            mLevelCurveProcessor[0x50] = &MinimumVolumeBox3::Z00Z10P01P11;
+            mLevelCurveProcessor[0x51] = &MinimumVolumeBox3::P00Z10P01P11;
+            mLevelCurveProcessor[0x52] = &MinimumVolumeBox3::M00Z10P01P11;
+            mLevelCurveProcessor[0x54] = &MinimumVolumeBox3::Z00P10P01P11;
+            mLevelCurveProcessor[0x55] = &MinimumVolumeBox3::P00P10P01P11;
+            mLevelCurveProcessor[0x56] = &MinimumVolumeBox3::M00P10P01P11;
+            mLevelCurveProcessor[0x58] = &MinimumVolumeBox3::Z00M10P01P11;
+            mLevelCurveProcessor[0x59] = &MinimumVolumeBox3::P00M10P01P11;
+            mLevelCurveProcessor[0x5a] = &MinimumVolumeBox3::M00M10P01P11;
+            mLevelCurveProcessor[0x60] = &MinimumVolumeBox3::Z00Z10M01P11;
+            mLevelCurveProcessor[0x61] = &MinimumVolumeBox3::P00Z10M01P11;
+            mLevelCurveProcessor[0x62] = &MinimumVolumeBox3::M00Z10M01P11;
+            mLevelCurveProcessor[0x64] = &MinimumVolumeBox3::Z00P10M01P11;
+            mLevelCurveProcessor[0x65] = &MinimumVolumeBox3::P00P10M01P11;
+            mLevelCurveProcessor[0x66] = &MinimumVolumeBox3::M00P10M01P11;
+            mLevelCurveProcessor[0x68] = &MinimumVolumeBox3::Z00M10M01P11;
+            mLevelCurveProcessor[0x69] = &MinimumVolumeBox3::P00M10M01P11;
+            mLevelCurveProcessor[0x6a] = &MinimumVolumeBox3::M00M10M01P11;
+            mLevelCurveProcessor[0x80] = &MinimumVolumeBox3::Z00Z10Z01M11;
+            mLevelCurveProcessor[0x81] = &MinimumVolumeBox3::P00Z10Z01M11;
+            mLevelCurveProcessor[0x82] = &MinimumVolumeBox3::M00Z10Z01M11;
+            mLevelCurveProcessor[0x84] = &MinimumVolumeBox3::Z00P10Z01M11;
+            mLevelCurveProcessor[0x85] = &MinimumVolumeBox3::P00P10Z01M11;
+            mLevelCurveProcessor[0x86] = &MinimumVolumeBox3::M00P10Z01M11;
+            mLevelCurveProcessor[0x88] = &MinimumVolumeBox3::Z00M10Z01M11;
+            mLevelCurveProcessor[0x89] = &MinimumVolumeBox3::P00M10Z01M11;
+            mLevelCurveProcessor[0x8a] = &MinimumVolumeBox3::M00M10Z01M11;
+            mLevelCurveProcessor[0x90] = &MinimumVolumeBox3::Z00Z10P01M11;
+            mLevelCurveProcessor[0x91] = &MinimumVolumeBox3::P00Z10P01M11;
+            mLevelCurveProcessor[0x92] = &MinimumVolumeBox3::M00Z10P01M11;
+            mLevelCurveProcessor[0x94] = &MinimumVolumeBox3::Z00P10P01M11;
+            mLevelCurveProcessor[0x95] = &MinimumVolumeBox3::P00P10P01M11;
+            mLevelCurveProcessor[0x96] = &MinimumVolumeBox3::M00P10P01M11;
+            mLevelCurveProcessor[0x98] = &MinimumVolumeBox3::Z00M10P01M11;
+            mLevelCurveProcessor[0x99] = &MinimumVolumeBox3::P00M10P01M11;
+            mLevelCurveProcessor[0x9a] = &MinimumVolumeBox3::M00M10P01M11;
+            mLevelCurveProcessor[0xa0] = &MinimumVolumeBox3::Z00Z10M01M11;
+            mLevelCurveProcessor[0xa1] = &MinimumVolumeBox3::P00Z10M01M11;
+            mLevelCurveProcessor[0xa2] = &MinimumVolumeBox3::M00Z10M01M11;
+            mLevelCurveProcessor[0xa4] = &MinimumVolumeBox3::Z00P10M01M11;
+            mLevelCurveProcessor[0xa5] = &MinimumVolumeBox3::P00P10M01M11;
+            mLevelCurveProcessor[0xa6] = &MinimumVolumeBox3::M00P10M01M11;
+            mLevelCurveProcessor[0xa8] = &MinimumVolumeBox3::Z00M10M01M11;
+            mLevelCurveProcessor[0xa9] = &MinimumVolumeBox3::P00M10M01M11;
+            mLevelCurveProcessor[0xaa] = &MinimumVolumeBox3::M00M10M01M11;
+        }
 
-        // Convenient values that occur regularly in the code.  When using
-        // rational ComputeType, we construct these numbers only once.
-        ComputeType mZero, mOne, mNegOne, mHalf;
+        // The subdivision-based sampling functions.
+        template <bool useDouble = computeDouble>
+        typename std::enable_if<useDouble, void>::type
+            Adjust(VCompute3& normal)
+        {
+            Normalize(normal);
+        }
+
+        template <bool useDouble = computeDouble>
+        typename std::enable_if<!useDouble, void>::type
+            Adjust(VCompute3&)
+        {
+            // Nothing to do when the compute type is rational.
+        }
+
+        void Pair(Candidate& c, Candidate& mvc)
+        {
+            ComputeVolume(c);
+            if (c.volume < mvc.volume)
+            {
+                mvc = c;
+            }
+        }
+
+        // The minimizers for the operator()(maxSample, *) function. The
+        // default behavior of MinimumVolumeBox3D is to use the built-in
+        // minimizers that sample the level curves as a simple search for a
+        // minimum volume. However, you can override the minimizers and
+        // provide a more sophisticated algorithm.
+        virtual void MinimizerConstantS(Candidate& c, Candidate& mvc)
+        {
+            std::vector<ComputeType> t(mMaxSample + 1);
+            t[0] = mZero;
+            t[mMaxSample] = mOne;
+            for (auto const& item : mDomainIndex)
+            {
+                t[item[0]] = mHalf * (t[item[1]] + t[item[2]]);
+            }
+
+            Adjust(c.axis[0]);
+            for (size_t i = 0, j = mMaxSample; i <= mMaxSample; ++i, --j)
+            {
+                c.axis[1] = t[j] * c.M[0] + t[i] * c.M[1];
+                Adjust(c.axis[1]);
+                ComputeVolume(c);
+                if (c.volume < mvc.volume)
+                {
+                    mvc = c;
+                }
+            }
+        }
+
+        virtual void MinimizerConstantT(Candidate& c, Candidate& mvc)
+        {
+            std::vector<ComputeType> s(mMaxSample + 1);
+            s[0] = mZero;
+            s[mMaxSample] = mOne;
+            for (auto const& item : mDomainIndex)
+            {
+                s[item[0]] = mHalf * (s[item[1]] + s[item[2]]);
+            }
+
+            Adjust(c.axis[1]);
+            for (size_t i = 0, j = mMaxSample; i <= mMaxSample; ++i, --j)
+            {
+                c.axis[0] = s[j] * c.N[0] + s[i] * c.N[1];
+                Adjust(c.axis[0]);
+                ComputeVolume(c);
+                if (c.volume < mvc.volume)
+                {
+                    mvc = c;
+                }
+            }
+        }
+
+        virtual void MinimizerVariableS(ComputeType const& sminNumer,
+            ComputeType const& smaxNumer, ComputeType const& sDenom,
+            Candidate& c, Candidate& mvc)
+        {
+            std::vector<ComputeType> s(mMaxSample + 1), oms(mMaxSample + 1);
+            s[0] = sminNumer;
+            oms[0] = sDenom - sminNumer;
+            s[mMaxSample] = smaxNumer;
+            oms[mMaxSample] = sDenom - smaxNumer;
+            for (auto const& item : mDomainIndex)
+            {
+                s[item[0]] = mHalf * (s[item[1]] + s[item[2]]);
+                oms[item[0]] = mHalf * (oms[item[1]] + oms[item[2]]);
+            }
+
+            for (size_t i = 0; i <= mMaxSample; ++i)
+            {
+                c.axis[0] = oms[i] * c.N[0] + s[i] * c.N[1];
+                Adjust(c.axis[0]);
+
+                ComputeType q0 = oms[i] * c.f00 + s[i] * c.f10;
+                ComputeType q1 = oms[i] * c.f01 + s[i] * c.f11;
+                if (q0 > q1)
+                {
+                    c.axis[1] = q0 * c.M[1] - q1 * c.M[0];
+                }
+                else
+                {
+                    c.axis[1] = q1 * c.M[0] - q0 * c.M[1];
+                }
+                Adjust(c.axis[1]);
+
+                ComputeVolume(c);
+                if (c.volume < mvc.volume)
+                {
+                    mvc = c;
+                }
+            }
+        }
+
+        virtual void MinimizerVariableT(ComputeType const& tminNumer,
+            ComputeType const& tmaxNumer, ComputeType const& tDenom,
+            Candidate& c, Candidate& mvc)
+        {
+            std::vector<ComputeType> t(mMaxSample + 1), omt(mMaxSample + 1);
+            t[0] = tminNumer;
+            omt[0] = tDenom - tminNumer;
+            t[mMaxSample] = tmaxNumer;
+            omt[mMaxSample] = tDenom - tmaxNumer;
+            for (auto const& item : mDomainIndex)
+            {
+                t[item[0]] = mHalf * (t[item[1]] + t[item[2]]);
+                omt[item[0]] = mHalf * (omt[item[1]] + omt[item[2]]);
+            }
+
+            for (size_t i = 0; i <= mMaxSample; ++i)
+            {
+                ComputeType p0 = omt[i] * c.f00 + t[i] * c.f01;
+                ComputeType p1 = omt[i] * c.f10 + t[i] * c.f11;
+                if (p0 > p1)
+                {
+                    c.axis[0] = p0 * c.N[1] - p1 * c.N[0];
+                }
+                else
+                {
+                    c.axis[0] = p1 * c.N[0] - p0 * c.N[1];
+                }
+                Adjust(c.axis[0]);
+
+                c.axis[1] = omt[i] * c.M[0] + t[i] * c.M[1];
+                Adjust(c.axis[1]);
+
+                ComputeVolume(c);
+                if (c.volume < mvc.volume)
+                {
+                    mvc = c;
+                }
+            }
+        }
+
+        void Z00Z10Z01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x00
+            // 0 0
+            // 0 0
+            //
+            // This case occurs when each edge is shared by two coplanar
+            // faces, so we have only two different normals. The normals
+            // are perpendicular.
+
+            c.axis[0] = c.N[0];
+            c.axis[1] = c.M[0];
+            Pair(c, mvc);
+        }
+
+        void P00Z10Z01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x01
+            // 0 0
+            // + 0
+
+            // tmin = 0, tmax = 1, s = 1
+            c.axis[0] = c.N[1];
+            MinimizerConstantS(c, mvc);
+
+            // smin = 0, smax = 1, t = 1
+            c.axis[1] = c.M[1];
+            MinimizerConstantT(c, mvc);
+        }
+
+        void M00Z10Z01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x02
+            // 0 0
+            // - 0
+
+            // tmin = 0, tmax = 1, s = 1
+            c.axis[0] = c.N[1];
+            MinimizerConstantS(c, mvc);
+
+            // smin = 0, smax = 1, t = 1
+            c.axis[1] = c.M[1];
+            MinimizerConstantT(c, mvc);
+        }
+
+        void Z00P10Z01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x04
+            // 0 0
+            // 0 +
+
+            // tmin = 0, tmax = 1, s = 0
+            c.axis[0] = c.N[0];
+            MinimizerConstantS(c, mvc);
+
+            // smin = 0, smax = 1, t = 1
+            c.axis[1] = c.M[1];
+            MinimizerConstantT(c, mvc);
+        }
+
+        void P00P10Z01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x05
+            // 0 0
+            // + +
+
+            // smin = 0, smax = 1, t = 1
+            c.axis[1] = c.M[1];
+            MinimizerConstantT(c, mvc);
+        }
+
+        void M00P10Z01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x06
+            // 0 0
+            // - +
+
+            // tmin = 0, tmax = 1
+            // s = -f00 / (f10 - f00), (+)/(+)
+            // 1-s = f10 / (f10 - f00), (+)/(+)
+            // N = (1-s) * N0 + s * N1, omit denominator
+            c.axis[0] = c.f10 * c.N[0] - c.f00 * c.N[1];
+            MinimizerConstantS(c, mvc);
+
+            // smin = 0, smax = 1, t = 1
+            c.axis[1] = c.M[1];
+            MinimizerConstantT(c, mvc);
+        }
+
+        void Z00M10Z01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x08
+            // 0 0
+            // 0 -
+
+            // tmin = 0, tmax = 1, s = 0
+            c.axis[0] = c.N[0];
+            MinimizerConstantS(c, mvc);
+
+            // smin = 0, smax = 1, t = 1
+            c.axis[1] = c.M[1];
+            MinimizerConstantT(c, mvc);
+        }
+
+        void P00M10Z01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x09
+            // 0 0
+            // + -
+
+            // tmin = 0, tmax = 1
+            // s = f00 / (f00 - f10), (+)/(+)
+            // 1-s = -f10 / (f00 - f10), (+)/(+)
+            // N = s * N1 + (1-s) * N0, omit denominator
+            c.axis[0] = c.f00 * c.N[1] - c.f10 * c.N[0];
+            MinimizerConstantS(c, mvc);
+
+            // smin = 0, smax = 0, t = 1
+            c.axis[1] = c.M[1];
+            MinimizerConstantT(c, mvc);
+        }
+
+        void M00M10Z01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x0a
+            // 0 0
+            // - -
+
+            // smin = 0, smax = 1, t = 1
+            c.axis[1] = c.M[1];
+            MinimizerConstantT(c, mvc);
+        }
+
+        void Z00Z10P01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x10
+            // + 0
+            // 0 0
+
+            // tmin = 0, tmax = 1, s = 1
+            c.axis[0] = c.N[1];
+            MinimizerConstantS(c, mvc);
+
+            // smin = 0, smax = 1, t = 0
+            c.axis[1] = c.M[0];
+            MinimizerConstantT(c, mvc);
+        }
+
+        void P00Z10P01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x11
+            // + 0
+            // + 0
+
+            // tmin = 0, tmax = 1, s = 1
+            c.axis[0] = c.N[1];
+            MinimizerConstantS(c, mvc);
+        }
+
+        void M00Z10P01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x12
+            // + 0
+            // - 0
+
+            // tmin = 0, tmax = 1, s = 1
+            c.axis[0] = c.N[1];
+            MinimizerConstantS(c, mvc);
+
+            // smin = 0, smax = 1
+            // t = -f00 / (f01 - f00), (+)/(+)
+            // 1-t = f01 / (f01 - f00), (+)/(+)
+            // M = (1-t) * M0 + t * M1, omit denominator
+            c.axis[1] = c.f01 * c.M[0] - c.f00 * c.M[1];
+            MinimizerConstantT(c, mvc);
+        }
+
+        void Z00P10P01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x14
+            // + 0
+            // 0 +
+            // It is not possible for a level curve to connect the corners.
+
+            c.axis[0] = c.N[0];
+            c.axis[1] = c.M[0];
+            Pair(c, mvc);
+
+            c.axis[0] = c.N[1];
+            c.axis[1] = c.M[1];
+            Pair(c, mvc);
+        }
+
+        void P00P10P01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x15
+            // + 0
+            // + +
+
+            c.axis[0] = c.N[1];
+            c.axis[1] = c.M[1];
+            Pair(c, mvc);
+        }
+
+        void M00P10P01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x16
+            // + 0
+            // - +
+
+            // smin = 0
+            // smax = -f00 / (f10 - f00), (+)/(+)
+            ComputeType f10mf00 = c.f10 - c.f00;
+            MinimizerVariableS(mZero, -c.f00, f10mf00, c, mvc);
+
+            c.axis[0] = c.N[1];
+            c.axis[1] = c.M[1];
+            Pair(c, mvc);
+        }
+
+        void Z00M10P01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x18
+            // + 0
+            // 0 -
+
+            // smin = 0, smax = 1
+            MinimizerVariableS(mZero, mOne, mOne, c, mvc);
+        }
+
+        void P00M10P01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x19
+            // + 0
+            // + -
+
+            // tmin = 0, tmax = 1
+            MinimizerVariableT(mZero, mOne, mOne, c, mvc);
+        }
+
+        void M00M10P01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x1a
+            // + 0
+            // - -
+
+            // smin = 0, smax = 1
+            MinimizerVariableS(mZero, mOne, mOne, c, mvc);
+        }
+
+        void Z00Z10M01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x20
+            // - 0
+            // 0 0
+
+            // tmin = 0, tmax = 1, s = 1
+            c.axis[0] = c.N[1];
+            MinimizerConstantS(c, mvc);
+
+            // smin = 0, smax = 1, t = 0
+            c.axis[1] = c.M[0];
+            MinimizerConstantT(c, mvc);
+        }
+
+        void P00Z10M01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x21
+            // - 0
+            // + 0
+
+            // tmin = 0, tmax = 1, s = 1
+            c.axis[0] = c.N[1];
+            MinimizerConstantS(c, mvc);
+
+            // smin = 0, smax = 1
+            // t = f00 / (f00 - f01), (+)/(+)
+            // 1-t = -f01 / (f00 - f01), (+)/(+)
+            // M = t * M1 + (1-t) * M0, omit denominator
+            c.axis[1] = c.f00 * c.M[1] - c.f01 * c.M[0];
+            MinimizerConstantT(c, mvc);
+        }
+
+        void M00Z10M01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x22
+            // - 0
+            // - 0
+
+            // tmin = 0, tmax = 1, s = 1
+            c.axis[0] = c.N[1];
+            MinimizerConstantS(c, mvc);
+        }
+
+        void Z00P10M01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x24
+            // - 0
+            // 0 +
+
+            // smin = 0, smax = 1
+            MinimizerVariableS(mZero, mOne, mOne, c, mvc);
+        }
+
+        void P00P10M01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x25
+            // - 0
+            // + +
+
+            // smin = 0, smax = 1
+            MinimizerVariableS(mZero, mOne, mOne, c, mvc);
+        }
+
+        void M00P10M01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x26
+            // - 0
+            // - +
+
+            // tmin = 0, tmax = 1
+            MinimizerVariableT(mZero, mOne, mOne, c, mvc);
+        }
+
+        void Z00M10M01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x28
+            // - 0
+            // 0 -
+            // It is not possible for a level curve to connect the corners.
+
+            c.axis[0] = c.N[0];
+            c.axis[1] = c.M[0];
+            Pair(c, mvc);
+
+            c.axis[0] = c.N[1];
+            c.axis[1] = c.M[1];
+            Pair(c, mvc);
+        }
+
+        void P00M10M01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x29
+            // - 0
+            // + -
+
+            // smin = 0
+            // smax = f00 / (f00 - f10), (+)/(+)
+            ComputeType f00mf10 = c.f00 - c.f10;
+            MinimizerVariableS(mZero, c.f00, f00mf10, c, mvc);
+
+            c.axis[0] = c.N[1];
+            c.axis[1] = c.M[1];
+            Pair(c, mvc);
+        }
+
+        void M00M10M01Z11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x2a
+            // - 0
+            // - -
+
+            c.axis[0] = c.N[1];
+            c.axis[1] = c.M[1];
+            Pair(c, mvc);
+        }
+
+        void Z00Z10Z01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x40
+            // 0 +
+            // 0 0
+
+            // tmin = 0, tmax = 1, s = 0
+            c.axis[0] = c.N[0];
+            MinimizerConstantS(c, mvc);
+
+            // smimn = 0, smax = 1, t = 0
+            c.axis[1] = c.M[0];
+            MinimizerConstantT(c, mvc);
+        }
+
+        void P00Z10Z01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x41
+            // 0 +
+            // + 0
+            // It is not possible for a level curve to connect the corners.
+
+            c.axis[0] = c.N[0];
+            c.axis[1] = c.M[1];
+            Pair(c, mvc);
+
+            c.axis[0] = c.N[1];
+            c.axis[1] = c.M[0];
+            Pair(c, mvc);
+        }
+
+        void M00Z10Z01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x42
+            // 0 +
+            // - 0
+
+            // smin = 0, smax = 1
+            MinimizerVariableS(mZero, mOne, mOne, c, mvc);
+        }
+
+        void Z00P10Z01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x44
+            // 0 +
+            // 0 +
+
+            // tmin = 0, tmax = 1, s = 0
+            c.axis[0] = c.N[0];
+            MinimizerConstantS(c, mvc);
+        }
+
+        void P00P10Z01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x45
+            // 0 +
+            // + +
+
+            c.axis[0] = c.N[0];
+            c.axis[1] = c.M[1];
+            Pair(c, mvc);
+        }
+
+        void M00P10Z01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x46
+            // 0 +
+            // - +
+
+            // tmin = 0, tmax = 1
+            MinimizerVariableT(mZero, mOne, mOne, c, mvc);
+        }
+
+        void Z00M10Z01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x48
+            // 0 +
+            // 0 -
+
+            // tmin = 0, tmax = 1, s = 0
+            c.axis[0] = c.N[0];
+            MinimizerConstantS(c, mvc);
+
+            // smin = 0, smax = 1
+            // t = -f10 / (f11 - f10), (+)/(+)
+            // 1-t = f11 / (f11 - f10), (+)/(+)
+            // M = (1-t) * M0 + t * M1, omit denominator
+            c.axis[1] = c.f11 * c.M[0] - c.f10 * c.M[1];
+            MinimizerConstantT(c, mvc);
+        }
+
+        void P00M10Z01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x49
+            // 0 +
+            // + -
+
+            // smin = f00 / (f00 - f10), (+)/(+)
+            // smax = 1
+            ComputeType f00mf10 = c.f00 - c.f10;
+            MinimizerVariableS(c.f00, f00mf10, f00mf10, c, mvc);
+
+            c.axis[0] = c.N[0];
+            c.axis[1] = c.M[1];
+            Pair(c, mvc);
+        }
+
+        void M00M10Z01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x4a
+            // 0 +
+            // - -
+
+            // smin = 0, smax = 1
+            MinimizerVariableS(mZero, mOne, mOne, c, mvc);
+        }
+
+        void Z00Z10P01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x50
+            // + +
+            // 0 0
+
+            // smin = 0, smax = 1, t = 0s
+            c.axis[1] = c.M[0];
+            MinimizerConstantT(c, mvc);
+        }
+
+        void P00Z10P01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x51
+            // + +
+            // + 0
+
+            c.axis[0] = c.N[1];
+            c.axis[1] = c.M[0];
+            Pair(c, mvc);
+        }
+
+        void M00Z10P01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x52
+            // + +
+            // - 0
+
+            // smin = 0, smax = 1
+            MinimizerVariableS(mZero, mOne, mOne, c, mvc);
+        }
+
+        void Z00P10P01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x54
+            // + +
+            // 0 +
+
+            c.axis[0] = c.N[0];
+            c.axis[1] = c.M[0];
+            Pair(c, mvc);
+        }
+
+        void P00P10P01P11(Candidate&, Candidate&)
+        {
+            // index = 0x55
+            // + +
+            // + +
+            // Nothing to do.
+        }
+
+        void M00P10P01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x56
+            // + +
+            // - +
+
+            // smin = 0
+            // smax = -f00 / (f10 - f00), (+)/(+)
+            ComputeType f10mf00 = c.f10 - c.f00;
+            MinimizerVariableS(mZero, -c.f00, f10mf00, c, mvc);
+        }
+
+        void Z00M10P01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x58
+            // + +
+            // 0 -
+
+            // smin = 0, smax = 1
+            MinimizerVariableS(mZero, mOne, mOne, c, mvc);
+        }
+
+        void P00M10P01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x59
+            // + +
+            // + -
+
+            // smin = f00 / (f00 - f10), (+)/(+)
+            // smax = 1
+            ComputeType f00mf10 = c.f00 - c.f10;
+            MinimizerVariableS(c.f00, f00mf10, f00mf10, c, mvc);
+        }
+
+        void M00M10P01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x5a
+            // + +
+            // - -
+
+            // smin = 0, smax = 1
+            MinimizerVariableS(mZero, mOne, mOne, c, mvc);
+        }
+
+        void Z00Z10M01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x60
+            // - +
+            // 0 0
+
+            // tmin = 0, tmax = 1
+            // s = -f01 / (f11 - f01), (+)/(+)
+            // 1-s = f11 / (f11 - f01), (+)/(+)
+            // N = (1-s) * N0 + s * N1, omit denominator
+            c.axis[0] = c.f11 * c.N[0] - c.f01 * c.N[1];
+            MinimizerConstantS(c, mvc);
+
+            // smin = 0, smax = 1, t = 0
+            c.axis[1] = c.M[0];
+            MinimizerConstantT(c, mvc);
+        }
+
+        void P00Z10M01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x61
+            // - +
+            // + 0
+
+            // smin = 0
+            // smax = -f01 / (f11 - f01), (+)/(+)
+            ComputeType f11mf01 = c.f11 - c.f01;
+            MinimizerVariableS(mZero, -c.f01, f11mf01, c, mvc);
+
+            c.axis[0] = c.N[1];
+            c.axis[1] = c.M[0];
+            Pair(c, mvc);
+        }
+
+        void M00Z10M01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x62
+            // - +
+            // - 0
+
+            // tmin = 0, tmax = 1
+            MinimizerVariableT(mZero, mOne, mOne, c, mvc);
+        }
+
+        void Z00P10M01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x64
+            // - +
+            // 0 +
+
+            // tmin = 0, tmax = 1
+            MinimizerVariableT(mZero, mOne, mOne, c, mvc);
+        }
+
+        void P00P10M01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x65
+            // - +
+            // + +
+
+            // smin = 0
+            // smax = -f01 / (f11 - f01), (+)/(+)
+            ComputeType f11mf01 = c.f11 - c.f01;
+            MinimizerVariableS(mZero, -c.f01, f11mf01, c, mvc);
+        }
+
+        void M00P10M01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x66
+            // - +
+            // - +
+
+            // tmin = 0, tmax = 1
+            MinimizerVariableT(mZero, mOne, mOne, c, mvc);
+        }
+
+        void Z00M10M01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x68
+            // - +
+            // 0 -
+
+            // smin = -f01 / (f11 - f01), (+)/(+)
+            // smax = 1
+            ComputeType f11mf01 = c.f11 - c.f01;
+            MinimizerVariableS(-c.f01, f11mf01, f11mf01, c, mvc);
+
+            c.axis[0] = c.N[0];
+            c.axis[1] = c.M[0];
+            Pair(c, mvc);
+        }
+
+        void P00M10M01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x69
+            // - +
+            // + -
+            //
+            // The level set F = 0 has two hyperbolic curves, each formed by a
+            // pair of endpoints in {(0,t0), (s0,0), (s1,1), (1,t1)}, where
+            // s0 = -f00 / (f10 - f00), s1 = -f01 / (f11 - f01),
+            // t0 = -f00 / (f01 - f00), t1 = -f10 / (f11 - f10), all quantites
+            // in (0,1). The two curves are on opposite sides of the
+            // asymptotes
+            //   sa = (f01 - f00) / ((f01 - f00) + (f10 - f11))
+            //   ta = (f10 - f00) / ((f10 - f00) + (f01 - f11))
+            // If s0 < sa, one curve has endpoints {(0,t0),(s0,0)} and the
+            // other curve has endpoints {(s1,1),(1,t1)}. If s0 > sa, one
+            // curve has endpoints {(0,t0),(s1,1)} and the other curve has
+            // endpoints {(s0,0),(1,t1)}. If s0 = sa, then segments of the
+            // asymptotes are the two curves for the level set. Define
+            // d = f00 * f11 - f10 * f01. It can be shown that
+            //   s0 - sa = d / ((f10 - f00)((f10 - f00) + (f01 - f11))
+            // The denominator is positive, so sign(s0 - sa) = sign(d). A
+            // similar argument applies for the comparison between t0 and ta.
+
+            ComputeType d = c.f00 * c.f11 - c.f10 * c.f01;
+            if (d > mZero)
+            {
+                // endpoints (s0,0) and (1,t1)
+                // smin = f00 / (f00 - f10), (+)/(+)
+                // smax = 1
+                ComputeType f00mf10 = c.f00 - c.f10;
+                MinimizerVariableS(c.f00, f00mf10, f00mf10, c, mvc);
+
+                // endpoints (0,t0) and (s1,1)
+                // smin = 0
+                // smax = -f01 / (f11 - f01), (+)/(+)
+                ComputeType f11mf01 = c.f11 - c.f01;
+                MinimizerVariableS(mZero, -c.f01, f11mf01, c, mvc);
+            }
+            else if (d < mZero)
+            {
+                // endpoints (0,t0) and (s0,0)
+                // smin = 0
+                // smax = f00 / (f00 - f10), (+)/(+)
+                ComputeType f00mf10 = c.f00 - c.f10;
+                MinimizerVariableS(mZero, c.f00, f00mf10, c, mvc);
+
+                // endpoints (s1,1) and (1,t1)
+                // smin = -f01 / (f11 - f01), (+)/(+)
+                // smax = 1
+                ComputeType f11mf01 = c.f11 - c.f01;
+                MinimizerVariableS(-c.f01, f11mf01, f11mf01, c, mvc);
+            }
+            else
+            {
+                // endpoints (sa,0) and (sa,1)
+                // sa = (f00 - f01) / ((f00 - f01) + (f11 - f10)), (+)/(+)
+                // 1-sa = (f11 - f10) / ((f00 - f01) + (f11 - f10)), (+)/(+)
+                // N = (1-sa) * N0 + sa * N1, omit the denominator
+                c.axis[0] = (c.f11 - c.f10) * c.N[0] + (c.f00 - c.f01) * c.N[1];
+                MinimizerConstantS(c, mvc);
+
+                // endpoints (0,ta) and (1,ta)
+                // ta = (f00 - f10) / ((f00 - f10) + (f11 - f01)), (+)/(+)
+                // 1-ta = (f11 - f01) / ((f00 - f01) + (f11 - f01)), (+)/(+)
+                // M = (1-ta) * M0 + ta * M1, omit the denominator
+                c.axis[1] = (c.f11 - c.f01) * c.M[0] + (c.f00 - c.f10) * c.M[1];
+                MinimizerConstantT(c, mvc);
+            }
+        }
+
+        void M00M10M01P11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x6a
+            // - +
+            // - -
+
+            // smin = -f01 / (f11 - f01), (+)/(+)
+            // smax = 1
+            ComputeType f11mf01 = c.f11 - c.f01;
+            MinimizerVariableS(-c.f01, f11mf01, f11mf01, c, mvc);
+        }
+
+        void Z00Z10Z01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x80
+            // 0 -
+            // 0 0
+
+            // tmin = 0, tmax = 1, s = 0
+            c.axis[0] = c.N[0];
+            MinimizerConstantS(c, mvc);
+
+            // smin = 0, smax = 1, t = 0
+            c.axis[1] = c.M[0];
+            MinimizerConstantT(c, mvc);
+        }
+
+        void P00Z10Z01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x81
+            // 0 -
+            // + 0
+
+            // smin = 0, smax = 1
+            MinimizerVariableS(mZero, mOne, mOne, c, mvc);
+        }
+
+        void M00Z10Z01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x82
+            // 0 -
+            // - 0
+            // It is not possible for a level curve to connect the corners.
+
+            c.axis[0] = c.N[0];
+            c.axis[1] = c.M[1];
+            Pair(c, mvc);
+
+            c.axis[0] = c.N[1];
+            c.axis[1] = c.M[0];
+            Pair(c, mvc);
+        }
+
+        void Z00P10Z01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x84
+            // 0 -
+            // 0 +
+
+            // tmin = 0, tmax = 1, s = 0
+            c.axis[0] = c.N[0];
+            MinimizerConstantS(c, mvc);
+
+            // smin = 0, smax = 1
+            // t = f10 / (f10 - f11), (+)/(+)
+            // 1-t = -f11 / (f10 - f11), (+)/(+)
+            // M = t * M1 + (1-t) * M0, omit the denominator
+            c.axis[1] = c.f10 * c.M[1] - c.f11 * c.M[0];
+            MinimizerConstantT(c, mvc);
+        }
+
+        void P00P10Z01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x85
+            // 0 -
+            // + +
+
+            // smin = 0, smax = 1
+            MinimizerVariableS(mZero, mOne, mOne, c, mvc);
+        }
+
+        void M00P10Z01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x86
+            // 0 -
+            // - +
+
+            // smin = -f00 / (f10 - f00), (+)/(+)
+            // smax = 1
+            ComputeType f10mf00 = c.f10 - c.f00;
+            MinimizerVariableS(-c.f00, f10mf00, f10mf00, c, mvc);
+        }
+
+        void Z00M10Z01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x88
+            // 0 -
+            // 0 -
+
+            // tmin = 0, tmax = 1, s = 0
+            c.axis[0] = c.N[0];
+            MinimizerConstantS(c, mvc);
+        }
+
+        void P00M10Z01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x89
+            // 0 -
+            // + -
+
+            // tmin = 0, tmax = 1
+            MinimizerVariableT(mZero, mOne, mOne, c, mvc);
+        }
+
+        void M00M10Z01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x8a
+            // 0 -
+            // - -
+
+            c.axis[0] = c.N[0];
+            c.axis[1] = c.M[1];
+            Pair(c, mvc);
+        }
+
+        void Z00Z10P01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x90
+            // + -
+            // 0 0
+
+            // tmin = 0, tmax = 1
+            // s = f01 / (f01 - f11), (+)/(+)
+            // 1-s = -f11 / (f01 - f11), (+)/(+)
+            // N = s * N1 + (1-s) * N0, omit the denominator
+            c.axis[0] = c.f01 * c.N[1] - c.f11 * c.N[0];
+            MinimizerConstantS(c, mvc);
+
+            // smin = 0, smax = 1, t = 0
+            c.axis[1] = c.M[0];
+            MinimizerConstantT(c, mvc);
+        }
+
+        void P00Z10P01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x91
+            // + -
+            // + 0
+
+            // tmin = 0, tmax = 1
+            MinimizerVariableT(mZero, mOne, mOne, c, mvc);
+        }
+
+        void M00Z10P01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x92
+            // + -
+            // - 0
+
+            // smin = 0
+            // smax = f01 / (f01 - f11), (+)/(+)
+            ComputeType f01mf11 = c.f01 - c.f11;
+            MinimizerVariableS(mZero, c.f01, f01mf11, c, mvc);
+
+            c.axis[0] = c.N[1];
+            c.axis[1] = c.M[0];
+            Pair(c, mvc);
+        }
+
+        void Z00P10P01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x94
+            // + -
+            // 0 +
+
+            // smin = f01 / (f01 - f11), (+)/(+)
+            // smax = 1
+            ComputeType f01mf11 = c.f01 - c.f11;
+            MinimizerVariableS(c.f01, f01mf11, f01mf11, c, mvc);
+
+            c.axis[0] = c.N[0];
+            c.axis[1] = c.M[0];
+            Pair(c, mvc);
+        }
+
+        void P00P10P01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x95
+            // + -
+            // + +
+
+            // smin = f01 / (f01 - f11), (+)/(+)
+            // smax = 1
+            ComputeType f01mf11 = c.f01 - c.f11;
+            MinimizerVariableS(c.f01, f01mf11, f01mf11, c, mvc);
+        }
+
+        void M00P10P01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x96
+            // + -
+            // - +
+            //
+            // The level set F = 0 has two hyperbolic curves, each formed by a
+            // pair of endpoints in {(0,t0), (s0,0), (s1,1), (1,t1)}, where
+            // s0 = -f00 / (f10 - f00), s1 = -f01 / (f11 - f01),
+            // t0 = -f00 / (f01 - f00), t1 = -f10 / (f11 - f10), all quantites
+            // in (0,1). The two curves are on opposite sides of the
+            // asymptotes
+            //   sa = (f01 - f00) / ((f01 - f00) + (f10 - f11))
+            //   ta = (f10 - f00) / ((f10 - f00) + (f01 - f11))
+            // If s0 < sa, one curve has endpoints {(0,t0),(s0,0)} and the
+            // other curve has endpoints {(s1,1),(1,t1)}. If s0 > sa, one
+            // curve has endpoints {(0,t0),(s1,1)} and the other curve has
+            // endpoints {(s0,0),(1,t1)}. If s0 = sa, then segments of the
+            // asymptotes are the two curves for the level set. Define
+            // d = f00 * f11 - f10 * f01. It can be shown that
+            //   s0 - sa = d / ((f10 - f00)((f10 - f00) + (f01 - f11))
+            // The denominator is positive, so sign(s0 - sa) = sign(d). A
+            // similar argument applies for the comparison between t0 and ta.
+
+            ComputeType d = c.f00 * c.f11 - c.f10 * c.f01;
+            if (d > mZero)
+            {
+                // endpoints (s0,0) and (1,t1)
+                // smin = -f00 / (f10 - f00), (+)/(+)
+                // smax = 1
+                ComputeType f10mf00 = c.f10 - c.f00;
+                MinimizerVariableS(-c.f00, f10mf00, f10mf00, c, mvc);
+
+                // endpoints (0,t0) and (s1,1)
+                // smin = 0
+                // smax = f01 / (f01 - f11)
+                ComputeType f01mf11 = c.f01 - c.f11;
+                MinimizerVariableS(mZero, c.f01, f01mf11, c, mvc);
+            }
+            else if (d < mZero)
+            {
+                // endpoints (0,t0) and (s0,0)
+                // smin = 0
+                // smax = -f00 / (f10- f00), (+)/(+)
+                ComputeType f10mf00 = c.f10 - c.f00;
+                MinimizerVariableS(mZero, -c.f00, f10mf00, c, mvc);
+
+                // endpoints (s1,1) and (1,t1)
+                // smin = f01 / (f01 - f11), (+)/(+)
+                // smax = 1
+                ComputeType f01mf11 = c.f01 - c.f11;
+                MinimizerVariableS(c.f01, f01mf11, f01mf11, c, mvc);
+            }
+            else
+            {
+                // endpoints (sa,0) and (sa,1)
+                // sa = (f01 - f00) / ((f01 - f00) + (f10 - f11)), (+)/(+)
+                // 1-sa = (f10 - f11) / ((f01 - f00) + (f10 - f11)), (+)/(+)
+                // N = (1-sa) * N0 + s1* N1
+                c.axis[0] = (c.f10 - c.f11) * c.N[0] + (c.f01 - c.f00) * c.N[1];
+                MinimizerConstantS(c, mvc);
+
+                // endpoints (0,ta) and (1,ta)
+                // ta = (f10 - f00) / ((f10 - f00) + (f01 - f11)), (+)/(+)
+                // 1-ta = (f01 - f11) / ((f10 - f00) + (f01 - f11)), (+)/(+)
+                // M = (1-ta) * M0 + ta * M1, omit the denominator
+                c.axis[1] = (c.f01 - c.f11) * c.M[0] + (c.f10 - c.f00) * c.M[1];
+                MinimizerConstantT(c, mvc);
+            }
+        }
+
+        void Z00M10P01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x98
+            // + -
+            // 0 -
+
+            // tmin = 0, tmax = 1
+            MinimizerVariableT(mZero, mOne, mOne, c, mvc);
+        }
+
+        void P00M10P01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x99
+            // + -
+            // + -
+
+            // tmin = 0, tmax = 1
+            MinimizerVariableT(mZero, mOne, mOne, c, mvc);
+        }
+
+        void M00M10P01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0x9a
+            // + -
+            // - -
+
+            // smin = 0
+            // smax = f01 / (f01 - f11), (+)/(+)
+            ComputeType f01mf11 = c.f01 - c.f11;
+            MinimizerVariableS(mZero, c.f01, f01mf11, c, mvc);
+        }
+
+        void Z00Z10M01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0xa0
+            // - -
+            // 0 0
+
+            // smin = 0, smax = 1, t = 0
+            c.axis[1] = c.M[0];
+            MinimizerConstantT(c, mvc);
+        }
+
+        void P00Z10M01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0xa1
+            // - -
+            // + 0
+
+            // smin = 0, smax = 1
+            MinimizerVariableS(mZero, mOne, mOne, c, mvc);
+        }
+
+        void M00Z10M01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0xa2
+            // - -
+            // - 0
+
+            c.axis[0] = c.N[1];
+            c.axis[1] = c.M[0];
+            Pair(c, mvc);
+        }
+
+        void Z00P10M01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0xa4
+            // - -
+            // 0 +
+
+            // smin = 0, smax = 1
+            MinimizerVariableS(mZero, mOne, mOne, c, mvc);
+        }
+
+        void P00P10M01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0xa5
+            // - -
+            // + +
+
+            // smin = 0, smax = 1
+            MinimizerVariableS(mZero, mOne, mOne, c, mvc);
+        }
+
+        void M00P10M01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0xa6
+            // - -
+            // - +
+
+            // smin = -f00 / (f10 - f00), (+)/(+)
+            // smax = 1
+            ComputeType f10mf00 = c.f10 - c.f00;
+            MinimizerVariableS(-c.f00, f10mf00, f10mf00, c, mvc);
+        }
+
+        void Z00M10M01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0xa8
+            // - -
+            // 0 -
+
+            c.axis[0] = c.N[0];
+            c.axis[1] = c.M[0];
+            Pair(c, mvc);
+        }
+
+        void P00M10M01M11(Candidate& c, Candidate& mvc)
+        {
+            // index = 0xa9
+            // - -
+            // + -
+
+            // smin = 0
+            // smax = f00 / (f00 - f10), (+)/(+)
+            ComputeType f00mf10 = c.f00 - c.f10;
+            MinimizerVariableS(mZero, c.f00, f00mf10, c, mvc);
+        }
+
+        void M00M10M01M11(Candidate&, Candidate&)
+        {
+            // index = 0xaa
+            // - -
+            // - -
+            // Nothing to do.
+        }
     };
 }

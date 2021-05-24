@@ -1,394 +1,656 @@
 // David Eberly, Geometric Tools, Redmond WA 98052
-// Copyright (c) 1998-2020
+// Copyright (c) 1998-2021
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// Version: 4.0.2019.08.13
+// Version: 4.0.2021.04.22
 
 #pragma once
 
-// Compute the convex hull of 3D points using incremental insertion.  The only
-// way to ensure a correct result for the input vertices (assumed to be exact)
-// is to choose ComputeType for exact rational arithmetic.  You may use
-// BSNumber.  No divisions are performed in this computation, so you do not
-// have to use BSRational.
+// Compute the convex hull of 3D points using incremental insertion. The only
+// way to ensure a correct result for the input vertices is to use an exact
+// predicate for computing signs of various expressions. The implementation
+// uses interval arithmetic and rational arithmetic for the predicate.
 //
-// The worst-case choices of N for Real of type BSNumber or BSRational with
-// integer storage UIntegerFP32<N> are listed in the next table.  The
-// numerical computations are encapsulated in PrimalQuery3<Real>::ToPlane.
-// We recommend using only BSNumber, because no divisions are performed in
-// the convex-hull computations.
+// TODO: A couple of potential optimizations need to be explored. The
+// divide-and-conquer algorithm computes two convex hulls for a set of points.
+// The two hulls are then merged into a single convex hull. The merge step
+// is not the theoretical one that attempts to determine mutual visibility
+// of the two hulls; rather, it combines the hulls into a single set of points
+// and computes the convex hull of that set. This can be improved by using the
+// left subhull in its current form and inserting points from the right subhull
+// one at a time. It might be possible to insert points and stop the process
+// when the partially merged polyhedron is the convex hull.
 //
-//    input type | compute type | N
-//    -----------+--------------+------
-//    float      | BSNumber     |    27
-//    double     | BSNumber     |   197
-//    float      | BSRational   |  2882
-//    double     | BSRational   | 21688
+// The other optimization is based on profiling. The VETManifoldMesh memory
+// management during insert/remove of vertices, edges and triangles suggests
+// that a specialized VET data structure can be designed to avoid this cost.
+//
+// The main cost of the algorithm is testing which side of a plane a point is
+// located. This test uses interval arithmetic to determine an exact sign,
+// if possible. If that test fails, rational arithmetic is used. For typical
+// datasets, the indeterminate sign from interval arithmetic happens rarely.
 
-#include <Mathematics/ETManifoldMesh.h>
-#include <Mathematics/PrimalQuery3.h>
-#include <Mathematics/Line.h>
-#include <Mathematics/Hyperplane.h>
-#include <functional>
+#include <Mathematics/ConvexHull2.h>
+#include <Mathematics/SWInterval.h>
+#include <Mathematics/Vector3.h>
+#include <Mathematics/VETManifoldMesh.h>
+#include <algorithm>
+#include <numeric>
+#include <queue>
 #include <set>
 #include <thread>
 
 namespace gte
 {
-    template <typename InputType, typename ComputeType>
+    template <typename Real>
     class ConvexHull3
     {
     public:
+        // Supporting constants and types for rational arithmetic used in
+        // the exact predicate for sign computations.
+        static int constexpr NumWords = std::is_same<Real, float>::value ? 27 : 197;
+        using Rational = BSNumber<UIntegerFP32<NumWords>>;
+
         // The class is a functor to support computing the convex hull of
-        // multiple data sets using the same class object.  For
-        // multithreading in Update, choose 'numThreads' subject to the
-        // constraints 1 <= numThreads <= std::thread::hardware_concurrency().
-        ConvexHull3(unsigned int numThreads = 1)
+        // multiple data sets using the same class object.
+        ConvexHull3()
             :
-            mEpsilon((InputType)0),
-            mDimension(0),
-            mLine(Vector3<InputType>::Zero(), Vector3<InputType>::Zero()),
-            mPlane(Vector3<InputType>::Zero(), (InputType)0),
-            mNumPoints(0),
-            mNumUniquePoints(0),
             mPoints(nullptr),
-            mNumThreads(numThreads)
+            mRPoints{},
+            mConverted{},
+            mDimension(0),
+            mVertices{},
+            mHull{},
+            mHullMesh{}
         {
         }
 
-        // The input is the array of points whose convex hull is required.
-        // The epsilon value is used to determine the intrinsic dimensionality
-        // of the vertices (d = 0, 1, 2, or 3).  When epsilon is positive, the
-        // determination is fuzzy--points approximately the same point,
-        // approximately on a line, approximately planar, or volumetric.
-        bool operator()(int numPoints, Vector3<InputType> const* points, InputType epsilon)
+        // Compute the exact convex hull using a blend of interval arithmetic
+        // and rational arithmetic. The code runs single-threaded when
+        // lgNumThreads = 0. It runs multithreaded when lgNumThreads > 0,
+        // where the number of threads is 2^{lgNumThreads} > 1.
+        void operator()(size_t numPoints, Vector3<Real> const* points,
+            size_t lgNumThreads)
         {
-            mEpsilon = std::max(epsilon, (InputType)0);
-            mDimension = 0;
-            mLine.origin = Vector3<InputType>::Zero();
-            mLine.direction = Vector3<InputType>::Zero();
-            mPlane.normal = Vector3<InputType>::Zero();
-            mPlane.constant = (InputType)0;
-            mNumPoints = numPoints;
-            mNumUniquePoints = 0;
+            LogAssert(numPoints > 0 && points != nullptr, "Invalid argument.");
+
+            // Allocate storage for any rational points that must be computed
+            // in the exact sign predicates. The rational points are memoized.
             mPoints = points;
-            mHullUnordered.clear();
-            mHullMesh.Clear();
+            mRPoints.resize(numPoints);
+            mConverted.resize(numPoints);
+            std::fill(mConverted.begin(), mConverted.end(), 0);
 
-            int i, j;
-            if (mNumPoints < 4)
+            // Sort all the points indirectly.
+            auto lessThanPoints = [this](size_t s0, size_t s1)
             {
-                // ConvexHull3 should be called with at least four points.
-                return false;
-            }
+                return mPoints[s0] < mPoints[s1];
+            };
 
-            IntrinsicsVector3<InputType> info(mNumPoints, mPoints, mEpsilon);
-            if (info.dimension == 0)
+            auto equalPoints = [this](size_t s0, size_t s1)
             {
-                // The set is (nearly) a point.
-                return false;
-            }
+                return mPoints[s0] == mPoints[s1];
+            };
 
-            if (info.dimension == 1)
+            std::vector<size_t> sorted(numPoints);
+            std::iota(sorted.begin(), sorted.end(), 0);
+            std::sort(sorted.begin(), sorted.end(), lessThanPoints);
+            auto newEnd = std::unique(sorted.begin(), sorted.end(), equalPoints);
+            sorted.erase(newEnd, sorted.end());
+
+            if (lgNumThreads > 0)
             {
-                // The set is (nearly) collinear.
-                mDimension = 1;
-                mLine = Line3<InputType>(info.origin, info.direction[0]);
-                return false;
-            }
-
-            if (info.dimension == 2)
-            {
-                // The set is (nearly) coplanar.
-                mDimension = 2;
-                mPlane = Plane3<InputType>(UnitCross(info.direction[0],
-                    info.direction[1]), info.origin);
-                return false;
-            }
-
-            mDimension = 3;
-
-            // Compute the vertices for the queries.
-            mComputePoints.resize(mNumPoints);
-            mQuery.Set(mNumPoints, &mComputePoints[0]);
-            for (i = 0; i < mNumPoints; ++i)
-            {
-                for (j = 0; j < 3; ++j)
+                size_t numThreads = (static_cast<size_t>(1) << lgNumThreads);
+                size_t load = sorted.size() / numThreads;
+                std::vector<size_t> inNumSorted(numThreads);
+                std::vector<size_t*> inSorted(numThreads);
+                std::vector<std::vector<size_t>> outVertices(numThreads);
+                std::vector<std::thread> process(numThreads);
+                inNumSorted.back() = sorted.size();
+                inSorted.front() = sorted.data();
+                for (size_t i0 = 0, i1 = 1; i1 < numThreads; i0 = i1++)
                 {
-                    mComputePoints[i][j] = points[i][j];
+                    inNumSorted[i0] = load;
+                    inNumSorted.back() -= load;
+                    inSorted[i1] = inSorted[i0] + load;
                 }
-            }
 
-            // Insert the faces of the (nondegenerate) tetrahedron
-            // constructed by the call to GetInformation.
-            if (!info.extremeCCW)
-            {
-                std::swap(info.extreme[2], info.extreme[3]);
-            }
-
-            mHullUnordered.push_back(TriangleKey<true>(info.extreme[1],
-                info.extreme[2], info.extreme[3]));
-            mHullUnordered.push_back(TriangleKey<true>(info.extreme[0],
-                info.extreme[3], info.extreme[2]));
-            mHullUnordered.push_back(TriangleKey<true>(info.extreme[0],
-                info.extreme[1], info.extreme[3]));
-            mHullUnordered.push_back(TriangleKey<true>(info.extreme[0],
-                info.extreme[2], info.extreme[1]));
-
-            // Incrementally update the hull.  The set of processed points is
-            // maintained to eliminate duplicates, either in the original
-            // input points or in the points obtained by snap rounding.
-            std::set<Vector3<InputType>> processed;
-            for (i = 0; i < 4; ++i)
-            {
-                processed.insert(points[info.extreme[i]]);
-            }
-            for (i = 0; i < mNumPoints; ++i)
-            {
-                if (processed.find(points[i]) == processed.end())
+                while (numThreads > 1)
                 {
-                    Update(i);
-                    processed.insert(points[i]);
+                    for (size_t i = 0; i < numThreads; ++i)
+                    {
+                        process[i] = std::thread(
+                            [this, i, &inNumSorted, &inSorted, &outVertices]()
+                            {
+                                size_t dimension = 0;
+                                std::vector<size_t> hull;
+                                VETManifoldMesh hullMesh;
+                                ComputeHull(inNumSorted[i], inSorted[i], dimension,
+                                    outVertices[i], hull, hullMesh);
+                            });
+                    }
+
+                    numThreads /= 2;
+
+                    auto target = sorted.begin();
+                    inSorted[0] = sorted.data();
+                    for (size_t i = 0, k = 0; i < numThreads; ++i)
+                    {
+                        process[2 * i].join();
+                        process[2 * i + 1].join();
+
+                        inNumSorted[i] = 0;
+                        auto begin = target;
+                        for (size_t j = 0; j < 2; ++j, ++k)
+                        {
+                            size_t numVertices = outVertices[k].size();
+                            inNumSorted[i] += numVertices;
+                            std::copy(outVertices[k].begin(), outVertices[k].end(), target);
+                            target += numVertices;
+                        }
+                        inSorted[i + 1] = inSorted[i] + inNumSorted[i];
+                        std::sort(begin, target, lessThanPoints);
+                    }
                 }
+
+                ComputeHull(inNumSorted[0], inSorted[0], mDimension, mVertices,
+                    mHull, mHullMesh);
             }
-            mNumUniquePoints = static_cast<int>(processed.size());
-            return true;
+            else
+            {
+                ComputeHull(sorted.size(), sorted.data(), mDimension, mVertices,
+                    mHull, mHullMesh);
+            }
         }
 
-        // Dimensional information.  If GetDimension() returns 1, the points
-        // lie on a line P+t*D (fuzzy comparison when epsilon > 0).  You can
-        // sort these if you need a polyline output by projecting onto the
-        // line each vertex X = P+t*D, where t = Dot(D,X-P). If GetDimension()
-        // returns 2, the points line on a plane P+s*U+t*V (fuzzy comparison
-        // when epsilon > 0).  You can project each point X = P+s*U+t*V, where
-        // s = Dot(U,X-P) and t = Dot(V,X-P), then apply ConvexHull2 to the
-        // (s,t) tuples.
-        inline InputType GetEpsilon() const
+        void operator()(std::vector<Vector3<Real>> const& points, size_t lgNumThreads)
         {
-            return mEpsilon;
+            operator()(points.size(), points.data(), lgNumThreads);
         }
 
-        inline int GetDimension() const
+        // The dimension is 0 (hull is a single point), 1 (hull is a line
+        // segment), 2 (hull is a convex polygon in 3D) or 3 (hull is a convex
+        // polyhedron).
+        inline size_t GetDimension() const
         {
             return mDimension;
         }
 
-        inline Line3<InputType> const& GetLine() const
+        // Get the indices into the input 'points[]' that correspond to hull
+        // vertices.
+        inline std::vector<size_t> const& GetVertices() const
         {
-            return mLine;
+            return mVertices;
         }
 
-        inline Plane3<InputType> const& GetPlane() const
+        // Get the indices into the input 'points[]' that correspond to hull
+        // vertices. The returned array is organized according to the hull
+        // dimension.
+        //   0: The hull is a single point. The returned array has size 1 with
+        //      index corresponding to that point.
+        //   1: The hull is a line segment. The returned array has size 2 with
+        //      indices corresponding to the segment endpoints.
+        //   2: The hull is a convex polygon in 3D. The returned array has
+        //      size N with indices corresponding to the polygon vertices.
+        //      The vertices are ordered.
+        //   3: The hull is a convex polyhedron. The returned array has T
+        //      triples of indices, each triple corresponding to a triangle
+        //      face of the hull. The face vertices are counterclockwise when
+        //      viewed by an observer outside the polyhedron. It is possible
+        //      that some triangle faces are coplanar.
+        // The number of vertices and triangles can vary depending on the
+        // number of threads used for computation. This is not an error. For
+        // example, when running with N threads it is possible to have a
+        // convex quadrilateral face formed by 2 coplanar triangles {v0,v1,v2}
+        // and {v0,v2,v3}. When running with M threads, it is possible that
+        // the same convex quadrilateral face is formed by 4 coplanar triangles
+        // {v0,v1,v2}, {v1,v2,v4}, {v2,v3,v4} and {v3,v0,v4}, where the
+        // vertices v0, v2 and v4 are colinear. In both cases, if V is the
+        // number of vertices and T is the number of triangles, then the
+        // number of edges is E = T/2 and Euler's formula is satisfied:
+        // V - E + T = 2.
+        inline std::vector<size_t> const& GetHull() const
         {
-            return mPlane;
+            return mHull;
         }
 
-        // Member access.
-        inline int GetNumPoints() const
+        // Get the hull mesh, which is valid only when the dimension is 3.
+        // This allows access to the graph of vertices, edges and triangles
+        // of the convex (polyhedron) hull.
+        inline VETManifoldMesh const& GetHullMesh() const
         {
-            return mNumPoints;
-        }
-
-        inline int GetNumUniquePoints() const
-        {
-            return mNumUniquePoints;
-        }
-
-        inline Vector3<InputType> const* GetPoints() const
-        {
-            return mPoints;
-        }
-
-        inline PrimalQuery3<ComputeType> const& GetQuery() const
-        {
-            return mQuery;
-        }
-
-        // The convex hull is a convex polyhedron with triangular faces.
-        inline std::vector<TriangleKey<true>> const& GetHullUnordered() const
-        {
-            return mHullUnordered;
-        }
-
-        ETManifoldMesh const& GetHullMesh() const
-        {
-            // Create the mesh only on demand.
-            if (mHullMesh.GetTriangles().size() == 0)
-            {
-                for (auto const& tri : mHullUnordered)
-                {
-                    mHullMesh.Insert(tri.V[0], tri.V[1], tri.V[2]);
-                }
-            }
-
             return mHullMesh;
         }
 
     private:
-        // Support for incremental insertion.
-        void Update(int i)
+        void ComputeHull(size_t numSorted, size_t* sorted, size_t& dimension,
+            std::vector<size_t>& vertices, std::vector<size_t>& hull,
+            VETManifoldMesh& hullMesh)
         {
-            // The terminator that separates visible faces from nonvisible
-            // faces is constructed by this code.  Visible faces for the
-            // incoming hull are removed, and the boundary of that set of
-            // triangles is the terminator.  New visible faces are added
-            // using the incoming point and the edges of the terminator.
-            //
-            // A simple algorithm for computing terminator edges is the
-            // following.  Back-facing triangles are located and the three
-            // edges are processed.  The first time an edge is visited,
-            // insert it into the terminator.  If it is visited a second time,
-            // the edge is removed because it is shared by another back-facing
-            // triangle and, therefore, cannot be a terminator edge.  After
-            // visiting all back-facing triangles, the only remaining edges in
-            // the map are the terminator edges.
-            //
-            // The order of vertices of an edge is important for adding new
-            // faces with the correct vertex winding.  However, the edge
-            // "toggle" (insert edge, remove edge) should use edges with
-            // unordered vertices, because the edge shared by one triangle has
-            // opposite ordering relative to that of the other triangle.  The
-            // map uses unordered edges as the keys but stores the ordered
-            // edge as the value.  This avoids having to look up an edge twice
-            // in a map with ordered edge keys.
+            dimension = 0;
+            vertices.clear();
+            hull.reserve(numSorted);
+            hull.clear();
+            hullMesh.Clear();
 
-            unsigned int numFaces = static_cast<unsigned int>(mHullUnordered.size());
-            std::vector<int> queryResult(numFaces);
-            if (mNumThreads > 1 && numFaces >= mNumThreads)
+            size_t current = 0;
+            if (Hull0(hull, numSorted, sorted, dimension, current))
             {
-                // Partition the data for multiple threads.
-                unsigned int numFacesPerThread = numFaces / mNumThreads;
-                std::vector<unsigned int> jmin(mNumThreads), jmax(mNumThreads);
-                for (unsigned int t = 0; t < mNumThreads; ++t)
-                {
-                    jmin[t] = t * numFacesPerThread;
-                    jmax[t] = jmin[t] + numFacesPerThread - 1;
-                }
-                jmax[mNumThreads - 1] = numFaces - 1;
-
-                // Execute the point-plane queries in multiple threads.
-                std::vector<std::thread> process(mNumThreads);
-                for (unsigned int t = 0; t < mNumThreads; ++t)
-                {
-                    process[t] = std::thread([this, i, t, &jmin, &jmax,
-                        &queryResult]()
-                        {
-                            for (unsigned int j = jmin[t]; j <= jmax[t]; ++j)
-                            {
-                                TriangleKey<true> const& tri = mHullUnordered[j];
-                                queryResult[j] = mQuery.ToPlane(i, tri.V[0], tri.V[1], tri.V[2]);
-                            }
-                        });
-                }
-
-                // Wait for all threads to finish.
-                for (unsigned int t = 0; t < mNumThreads; ++t)
-                {
-                    process[t].join();
-                }
-            }
-            else
-            {
-                unsigned int j = 0;
-                for (auto const& tri : mHullUnordered)
-                {
-                    queryResult[j++] = mQuery.ToPlane(i, tri.V[0], tri.V[1], tri.V[2]);
-                }
+                vertices.resize(1);
+                vertices[0] = hull[0];
+                return;
             }
 
-            std::map<EdgeKey<false>, std::pair<int, int>> terminator;
-            std::vector<TriangleKey<true>> backFaces;
-            bool existsFrontFacingTriangle = false;
-            unsigned int j = 0;
-            for (auto const& tri : mHullUnordered)
+            if (Hull1(hull, numSorted, sorted, dimension, current))
             {
-                if (queryResult[j++] <= 0)
-                {
-                    // The triangle is back facing.  These include triangles
-                    // that are coplanar with the incoming point.
-                    backFaces.push_back(tri);
+                vertices.resize(2);
+                vertices[0] = hull[0];
+                vertices[1] = hull[1];
+                return;
+            }
 
-                    // The current hull is a 2-manifold watertight mesh.  The
-                    // terminator edges are those shared with a front-facing
-                    // triangle.  The first time an edge of a back-facing
-                    // triangle is visited, insert it into the terminator.  If
-                    // it is visited a second time, the edge is removed
-                    // because it is shared by another back-facing triangle.
-                    // After all back-facing triangles are visited, the only
-                    // remaining edges are shared by a single back-facing
-                    // triangle, which makes them terminator edges.
-                    for (int j0 = 2, j1 = 0; j1 < 3; j0 = j1++)
+            if (Hull2(hull, numSorted, sorted, dimension, current))
+            {
+                vertices.resize(hull.size());
+                std::copy(hull.begin(), hull.end(), vertices.begin());
+                return;
+            }
+
+            Hull3(hull, numSorted, sorted, hullMesh, current);
+
+            auto const& vMap = hullMesh.GetVertices();
+            vertices.resize(vMap.size());
+            size_t index = 0;
+            for (auto const& element : vMap)
+            {
+                vertices[index++] = element.first;
+            }
+
+            auto const& tMap = hullMesh.GetTriangles();
+            hull.resize(3 * tMap.size());
+            index = 0;
+            for (auto const& element : tMap)
+            {
+                hull[index++] = element.first.V[0];
+                hull[index++] = element.first.V[1];
+                hull[index++] = element.first.V[2];
+            }
+        }
+
+        // Support for computing a 0-dimensional convex hull.
+        bool Hull0(std::vector<size_t>& hull, size_t numSorted, size_t* sorted,
+            size_t& dimension, size_t& current)
+        {
+            hull.push_back(sorted[current]);  // hull[0]
+            for (++current; current < numSorted; ++current)
+            {
+                if (!Colocated(hull[0], sorted[current]))
+                {
+                    dimension = 1;
+                    break;
+                }
+            }
+            return dimension == 0;
+        }
+
+        // Support for computing a 1-dimensional convex hull.
+        bool Hull1(std::vector<size_t>& hull, size_t numSorted, size_t* sorted,
+            size_t& dimension, size_t& current)
+        {
+            hull.push_back(sorted[current]);  // hull[1]
+            for (++current; current < numSorted; ++current)
+            {
+                if (!Colinear(hull[0], hull[1], sorted[current]))
+                {
+                    dimension = 2;
+                    break;
+                }
+                hull.push_back(sorted[current]);
+            }
+
+            if (hull.size() > 2)
+            {
+                // Sort the points and choose the extreme points as the
+                // endpoints of the line segment that is the convex hull.
+                std::sort(hull.begin(), hull.end(),
+                    [this](size_t v0, size_t v1)
                     {
-                        int v0 = tri.V[j0], v1 = tri.V[j1];
-                        EdgeKey<false> edge(v0, v1);
-                        auto iter = terminator.find(edge);
-                        if (iter == terminator.end())
-                        {
-                            // The edge is visited for the first time.
-                            terminator.insert(std::make_pair(edge, std::make_pair(v0, v1)));
-                        }
-                        else
-                        {
-                            // The edge is visited for the second time.
-                            terminator.erase(edge);
-                        }
+                        return mPoints[v0] < mPoints[v1];
+                    });
+
+                size_t hmin = hull.front();
+                size_t hmax = hull.back();
+                hull.clear();
+                hull.push_back(hmin);
+                hull.push_back(hmax);
+            }
+
+            return dimension == 1;
+        }
+
+        // Support for computing a 2-dimensional convex hull.
+        bool Hull2(std::vector<size_t>& hull, size_t numSorted, size_t* sorted,
+            size_t& dimension, size_t& current)
+        {
+            hull.push_back(sorted[current]);  // hull[2]
+            for (++current; current < numSorted; ++current)
+            {
+                if (ToPlane(hull[0], hull[1], hull[2], sorted[current]) != 0)
+                {
+                    dimension = 3;
+                    break;
+                }
+                hull.push_back(sorted[current]);
+            }
+
+            if (hull.size() > 3)
+            {
+                // Compute the planar convex hull of the points. The coplanar
+                // points are projected onto a 2D plane determined by the
+                // maximum absolute component of the normal of the first
+                // triangle. The extreme points of the projected hull generate
+                // the extreme points of the planar hull in 3D.
+                auto const& rV0 = GetRationalPoint(hull[0]);
+                auto const& rV1 = GetRationalPoint(hull[1]);
+                auto const& rV2 = GetRationalPoint(hull[2]);
+                auto const rDiff1 = rV1 - rV0;
+                auto const rDiff2 = rV2 - rV0;
+                auto rNormal = Cross(rDiff1, rDiff2);
+
+                // The signs are used to select 2 of the 3 point components so
+                // that when the planar hull is viewed from the side of the
+                // plane to which rNormal is directed, the triangles are
+                // counterclockwise ordered.
+                std::array<int32_t, 3> sign{};
+                for (int32_t i = 0; i < 3; ++i)
+                {
+                    sign[i] = rNormal[i].GetSign();
+                    rNormal[i].SetSign(std::abs(sign[i]));
+                };
+
+                std::pair<int32_t, int32_t> c;
+                if (rNormal[0] > rNormal[1])
+                {
+                    if (rNormal[0] > rNormal[2])
+                    {
+                        c = (sign[0] > 0 ? std::make_pair(1, 2) : std::make_pair(2, 1));
+                    }
+                    else
+                    {
+                        c = (sign[2] > 0 ? std::make_pair(0, 1) : std::make_pair(1, 0));
                     }
                 }
                 else
                 {
-                    // If there are no strictly front-facing triangles, then
-                    // the incoming point is inside or on the convex hull.  If
-                    // we get to this code, then the point is truly outside
-                    // and we can update the hull.
-                    existsFrontFacingTriangle = true;
+                    if (rNormal[1] > rNormal[2])
+                    {
+                        c = (sign[1] > 0 ? std::make_pair(2, 0) : std::make_pair(0, 2));
+                    }
+                    else
+                    {
+                        c = (sign[2] > 0 ? std::make_pair(0, 1) : std::make_pair(1, 0));
+                    }
+                }
+
+                std::vector<Vector2<Real>> projections(hull.size());
+                for (size_t i = 0; i < projections.size(); ++i)
+                {
+                    size_t h = hull[i];
+                    projections[i][0] = mPoints[h][c.first];
+                    projections[i][1] = mPoints[h][c.second];
+                }
+
+                ConvexHull2<Real> ch2;
+                ch2((int)projections.size(), projections.data(), static_cast<Real>(0));
+                auto const& hull2 = ch2.GetHull();
+
+                std::vector<size_t> tempHull(hull2.size());
+                for (size_t i = 0; i < hull2.size(); ++i)
+                {
+                    tempHull[i] = hull[static_cast<size_t>(hull2[i])];
+                }
+                hull.clear();
+                for (size_t i = 0; i < hull2.size(); ++i)
+                {
+                    hull.push_back(tempHull[i]);
                 }
             }
 
-            if (!existsFrontFacingTriangle)
+            return dimension == 2;
+        }
+
+        // Support for computing a 3-dimensional convex hull.
+        void Hull3(std::vector<size_t>& hull, size_t numSorted, size_t* sorted,
+            VETManifoldMesh& hullMesh, size_t& current)
+        {
+            using TrianglePtr = VETManifoldMesh::Triangle*;
+            // The hull points previous to the current one are coplanar and
+            // are the vertices of a convex polygon. To initialize the 3D
+            // hull, use triangles from a triangle fan of the convex polygon
+            // and use triangles connecting the current point to the edges
+            // of the convex polygon. The vertex ordering of these triangles
+            // depends on whether sorted[current] is on the positive or
+            // negative side of the plane determined by hull[0], hull[1] and
+            // hull[2].
+            int32_t sign = ToPlane(hull[0], hull[1], hull[2], sorted[current]);
+            int32_t h0, h1, h2;
+            if (sign > 0)
             {
-                // The incoming point is inside or on the current hull, so no
-                // update of the hull is necessary.
-                return;
+                h0 = static_cast<int32_t>(hull[0]);
+                for (size_t i1 = 1, i2 = 2; i2 < hull.size(); i1 = i2++)
+                {
+                    h1 = static_cast<int32_t>(hull[i1]);
+                    h2 = static_cast<int32_t>(hull[i2]);
+                    auto inserted = hullMesh.Insert(h0, h2, h1);
+                    LogAssert(
+                        inserted != nullptr,
+                        "Unexpected insertion failure.");
+                }
+
+                h0 = static_cast<int32_t>(sorted[current]);
+                for (size_t i1 = hull.size() - 1, i2 = 0; i2 < hull.size(); i1 = i2++)
+                {
+                    h1 = static_cast<int32_t>(hull[i1]);
+                    h2 = static_cast<int32_t>(hull[i2]);
+                    auto inserted = hullMesh.Insert(h0, h1, h2);
+                    LogAssert(
+                        inserted != nullptr,
+                        "Unexpected insertion failure.");
+                }
+            }
+            else
+            {
+                h0 = static_cast<int32_t>(hull[0]);
+                for (size_t i1 = 1, i2 = 2; i2 < hull.size(); i1 = i2++)
+                {
+                    h1 = static_cast<int32_t>(hull[i1]);
+                    h2 = static_cast<int32_t>(hull[i2]);
+                    auto inserted = hullMesh.Insert(h0, h1, h2);
+                    LogAssert(
+                        inserted != nullptr,
+                        "Unexpected insertion failure.");
+                }
+
+                h0 = static_cast<int32_t>(sorted[current]);
+                for (size_t i1 = hull.size() - 1, i2 = 0; i2 < hull.size(); i1 = i2++)
+                {
+                    h1 = static_cast<int32_t>(hull[i1]);
+                    h2 = static_cast<int32_t>(hull[i2]);
+                    auto inserted = hullMesh.Insert(h0, h2, h1);
+                    LogAssert(
+                        inserted != nullptr,
+                        "Unexpected insertion failure.");
+                }
             }
 
-            // The updated hull contains the triangles not visible to the
-            // incoming point.
-            mHullUnordered = backFaces;
-
-            // Insert the triangles formed by the incoming point and the
-            // terminator edges.
-            for (auto const& edge : terminator)
+            // The hull is now maintained in hullMesh, so there is no need
+            // to add members to hull. At the time the full hull is known,
+            // hull will be assigned the triangle indices.
+            std::vector<std::array<int32_t, 2>> terminator;
+            for (++current; current < numSorted; ++current)
             {
-                mHullUnordered.push_back(TriangleKey<true>(i, edge.second.second, edge.second.first));
+                // The index h0 refers to the previously inserted hull point.
+                // The index h1 refers to the current point to be inserted
+                // into the hull.
+                auto const& vMap = hullMesh.GetVertices();
+                auto vIter = vMap.find(h0);
+                LogAssert(vIter != vMap.end(), "Unexpected condition.");
+                h1 = static_cast<int32_t>(sorted[current]);
+
+                // The sorting guarantees that the point at h0 is visible to
+                // the point at h1. Find the triangles that share h0 and are
+                // visible to h1
+                std::queue<TrianglePtr> visible;
+                std::set<TrianglePtr> visited;
+                for (auto const& tri : vIter->second->TAdjacent)
+                {
+                    sign = ToPlane(tri->V[0], tri->V[1], tri->V[2], h1);
+                    if (sign > 0)
+                    {
+                        visible.push(tri);
+                        visited.insert(tri);
+                        break;
+                    }
+                }
+                LogAssert(visible.size() > 0, "Unexpected condition.");
+
+                // Remove the connected component of visible triangles. Save
+                // the terminator edges for insertion of the new visible set
+                // of triangles.
+                terminator.clear();
+                while (visible.size() > 0)
+                {
+                    TrianglePtr tri = visible.front();
+                    visible.pop();
+                    for (size_t i = 0; i < 3; ++i)
+                    {
+                        auto adj = tri->T[i];
+                        if (adj)
+                        {
+                            if (ToPlane(adj->V[0], adj->V[1], adj->V[2], h1) <= 0)
+                            {
+                                // The shared edge of tri and adj is a
+                                // terminator.
+                                terminator.push_back({ tri->V[i], tri->V[(i + 1) % 3] });
+                            }
+                            else
+                            {
+                                if (visited.find(adj) == visited.end())
+                                {
+                                    visible.push(adj);
+                                    visited.insert(adj);
+                                }
+                            }
+                        }
+                    }
+                    visited.erase(tri);
+                    bool removed = hullMesh.Remove(tri->V[0], tri->V[1], tri->V[2]);
+                    LogAssert(
+                        removed,
+                        "Unexpected removal failure.");
+                }
+
+                // Insert the new hull triangles.
+                for (auto const& edge : terminator)
+                {
+                    auto inserted = hullMesh.Insert(edge[0], edge[1], h1);
+                    LogAssert(
+                        inserted != nullptr,
+                        "Unexpected insertion failure.");
+                }
+
+                // The current index h1 becomes the previous index h0 for the
+                // next pass of the 'current' loop.
+                h0 = h1;
             }
         }
 
-        // The epsilon value is used for fuzzy determination of intrinsic
-        // dimensionality.  If the dimension is 0, 1, or 2, the constructor
-        // returns early.  The caller is responsible for retrieving the
-        // dimension and taking an alternate path should the dimension be
-        // smaller than 3.  If the dimension is 0, the caller may as well
-        // treat all points[] as a single point, say, points[0].  If the
-        // dimension is 1, the caller can query for the approximating line
-        // and project points[] onto it for further processing.  If the
-        // dimension is 2, the caller can query for the approximating plane
-        // and project points[] onto it for further processing.
-        InputType mEpsilon;
-        int mDimension;
-        Line3<InputType> mLine;
-        Plane3<InputType> mPlane;
+        // Memoized access to the rational representation of the points.
+        Vector3<Rational> const& GetRationalPoint(size_t index)
+        {
+            if (mConverted[index] == 0)
+            {
+                mConverted[index] = 1;
+                for (int i = 0; i < 3; ++i)
+                {
+                    mRPoints[index][i] = mPoints[index][i];
+                }
+            }
+            return mRPoints[index];
+        }
 
-        // The array of points used for geometric queries.  If you want to be
-        // certain of a correct result, choose ComputeType to be BSNumber.
-        std::vector<Vector3<ComputeType>> mComputePoints;
-        PrimalQuery3<ComputeType> mQuery;
+        bool Colocated(size_t v0, size_t v1)
+        {
+            auto const& r0 = GetRationalPoint(v0);
+            auto const& r1 = GetRationalPoint(v1);
+            return r0 == r1;
+        }
 
-        int mNumPoints;
-        int mNumUniquePoints;
-        Vector3<InputType> const* mPoints;
-        std::vector<TriangleKey<true>> mHullUnordered;
-        mutable ETManifoldMesh mHullMesh;
-        unsigned int mNumThreads;
+        bool Colinear(size_t v0, size_t v1, size_t v2)
+        {
+            auto const& rvec0 = GetRationalPoint(v0);
+            auto const& rvec1 = GetRationalPoint(v1);
+            auto const& rvec2 = GetRationalPoint(v2);
+            auto const rdiff1 = rvec1 - rvec0;
+            auto const rdiff2 = rvec2 - rvec0;
+            auto const rcross = Cross(rdiff1, rdiff2);
+            return rcross[0].GetSign() == 0
+                && rcross[1].GetSign() == 0
+                && rcross[2].GetSign() == 0;
+        }
+
+        // For a plane with origin V0 and normal N = Cross(V1-V0,V2-V0),
+        // ToPlane returns
+        //   +1, V3 on positive side of plane (side to which N points)
+        //   -1, V3 on negative side of plane (side to which -N points)
+        //    0, V3 on the plane
+        int ToPlane(size_t v0, size_t v1, size_t v2, size_t v3)
+        {
+            using SInterval = SWInterval<Real>;
+            using SVector3 = Vector3<SInterval>;
+
+            // Attempt to classify the sign using interval arithmetic.
+            SVector3 const s0{ mPoints[v0][0], mPoints[v0][1], mPoints[v0][2] };
+            SVector3 const s1{ mPoints[v1][0], mPoints[v1][1], mPoints[v1][2] };
+            SVector3 const s2{ mPoints[v2][0], mPoints[v2][1], mPoints[v2][2] };
+            SVector3 const s3{ mPoints[v3][0], mPoints[v3][1], mPoints[v3][2] };
+            auto const sDiff1 = s1 - s0;
+            auto const sDiff2 = s2 - s0;
+            auto const sDiff3 = s3 - s0;
+            auto const sDet = DotCross(sDiff1, sDiff2, sDiff3);
+            if (sDet[0] > 0)
+            {
+                return +1;
+            }
+            if (sDet[1] < 0)
+            {
+                return -1;
+            }
+
+            // The sign is indeterminate using interval arithmetic.
+            auto const& r0 = GetRationalPoint(v0);
+            auto const& r1 = GetRationalPoint(v1);
+            auto const& r2 = GetRationalPoint(v2);
+            auto const& r3 = GetRationalPoint(v3);
+            auto const rDiff1 = r1 - r0;
+            auto const rDiff2 = r2 - r0;
+            auto const rDiff3 = r3 - r0;
+            auto const rDet = DotCross(rDiff1, rDiff2, rDiff3);
+            return rDet.GetSign();
+        }
+
+    private:
+        // A blend of interval arithmetic and exact arithmetic is used to
+        // ensure correctness.
+        Vector3<Real> const* mPoints;
+        std::vector<Vector3<Rational>> mRPoints;
+        std::vector<uint32_t> mConverted;
+
+        // The output data.
+        size_t mDimension;
+        std::vector<size_t> mVertices;
+        std::vector<size_t> mHull;
+        VETManifoldMesh mHullMesh;
     };
 }
