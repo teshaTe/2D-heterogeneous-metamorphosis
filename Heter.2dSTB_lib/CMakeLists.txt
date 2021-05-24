@@ -18,8 +18,12 @@ set (SRC_SOURCE   src/distanceTransform2D.cpp
     )
 
 add_library(hstb_lib ${SRC_SOURCE} ${SRC_HEADERS})
-target_link_libraries(hstb_lib  opencv_imgcodecs opencv_highgui opencv_imgproc opencv_core gtmathematicsgpu)
+target_link_libraries(hstb_lib opencv_imgcodecs opencv_highgui opencv_imgproc opencv_core)
 
 if(USE_OPENMP)
-    target_link_libraries(hstb_lib gomp omp omptarget)
+    if(BUILD_FOR_WINDOWS)
+        target_link_libraries(hstb_lib libomp)
+    else()
+        target_link_libraries(hstb_lib gomp omp omptarget)
+    endif()
 endif()
