@@ -6,7 +6,7 @@
  * 1. for defining circumscribed circles/rectangles and finding the maximum one;
  * 2. for computing steps for the Affine translation operation
  */
-#include <opencv4/opencv2/imgproc.hpp>
+#include <opencv2/imgproc.hpp>
 #include <glm/glm.hpp>
 #include <vector>
 

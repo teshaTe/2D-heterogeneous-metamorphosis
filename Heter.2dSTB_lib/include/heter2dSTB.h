@@ -25,8 +25,8 @@
 #include "include/STTI.h"
 #include "include/imageProc.h"
 
-#include <opencv4/opencv2/imgcodecs.hpp>
-#include <opencv4/opencv2/highgui.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/highgui.hpp>
 #include <glm/glm.hpp>
 
 #include <memory>

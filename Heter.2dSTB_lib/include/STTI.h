@@ -17,7 +17,7 @@
     This class also provides three pairs of colour coversions between RGB, HSV and CIELab
  */
 
-#include <opencv4/opencv2/core.hpp>
+#include <opencv2/core.hpp>
 #include <glm/glm.hpp>
 #include <vector>
 
