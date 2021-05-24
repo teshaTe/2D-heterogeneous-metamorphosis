@@ -1,10 +1,11 @@
 
 
-# Automatically Controlled Morphing of 2D Shapes with Textures
-
-## published on January 2020, SIAM Journal on Imaging Sciences 13(1):78-107
-## SIAM SIIMS: https://epubs.siam.org/doi/10.1137/19M1241581
-## ResearchGate: https://www.researchgate.net/publication/339050410_Automatically_Controlled_Morphing_of_2D_Shapes_with_Textures
+## Automatically Controlled Morphing of 2D Shapes with Textures
+ published on January 2020, SIAM Journal on Imaging Sciences 13(1):78-107
+ 
+ SIAM SIIMS: https://epubs.siam.org/doi/10.1137/19M1241581
+ 
+ ResearchGate: https://www.researchgate.net/publication/339050410_Automatically_Controlled_Morphing_of_2D_Shapes_with_Textures
 
 ### Status: *Finished*
 
